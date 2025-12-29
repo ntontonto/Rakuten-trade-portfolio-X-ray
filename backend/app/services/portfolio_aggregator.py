@@ -7,7 +7,7 @@ Ported from JavaScript (index.html lines 699-874)
 """
 from datetime import datetime, date
 from typing import List, Dict, Optional
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from uuid import UUID
 from sqlalchemy.orm import Session
 
@@ -304,6 +304,8 @@ class PortfolioAggregator:
             .all()
         )
 
+        points_invested = Decimal('0')
+
         cash_flows = []
         for tx in all_transactions:
             if tx.side == 'BUY':
@@ -313,6 +315,11 @@ class PortfolioAggregator:
                         amount=-float(tx.amount_jpy)
                     )
                 )
+                try:
+                    points_used = (tx.raw_data or {}).get('points_used', 0) or 0
+                    points_invested += Decimal(str(points_used))
+                except (InvalidOperation, TypeError, ValueError):
+                    pass
             elif tx.side == 'SELL':
                 cash_flows.append(
                     CashFlow(
@@ -339,6 +346,8 @@ class PortfolioAggregator:
             'total_xirr': portfolio_xirr,
             'total_current_value': float(total_current_value),
             'total_invested': float(total_invested),
+            'points_invested': float(points_invested),
+            'total_invested_with_points': float(total_invested + points_invested),
             'total_unrealized_pl': float(total_unrealized_pl),
             'total_realized_pl': float(total_realized_pl),
             'return_rate': return_rate,

@@ -231,6 +231,8 @@ def get_portfolio_metrics(
         total_xirr=summary['total_xirr'],
         total_current_value=summary['total_current_value'],
         total_invested=summary['total_invested'],
+        points_invested=summary['points_invested'],
+        total_invested_with_points=summary['total_invested_with_points'],
         total_unrealized_pl=summary['total_unrealized_pl'],
         total_realized_pl=summary['total_realized_pl'],
         return_rate=summary['return_rate'],

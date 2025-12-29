@@ -62,6 +62,14 @@ export default function Dashboard() {
           <p className="text-xs text-slate-500 mt-1">
             ※「現在単価」を修正すると、XIRRおよび資産評価額がリアルタイムで再計算されます。
           </p>
+          <div className="flex flex-wrap items-center gap-3 mt-3 text-xs text-slate-600">
+            <span className="px-2 py-1 bg-white border border-slate-200 rounded-md shadow-sm">
+              累計投資額: ¥{Math.floor(summary.total_invested).toLocaleString()}
+            </span>
+            <span className="px-2 py-1 bg-indigo-50 border border-indigo-100 text-indigo-700 rounded-md shadow-sm">
+              累積投資額（ポイント含む）: ¥{Math.floor(summary.total_invested_with_points).toLocaleString()}（ポイント {Math.floor(summary.points_invested).toLocaleString()}）
+            </span>
+          </div>
         </div>
         <HoldingsTable holdings={holdings} />
       </section>

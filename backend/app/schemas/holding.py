@@ -22,6 +22,8 @@ class HoldingResponse(BaseModel):
     current_price: Optional[Decimal] = None
     current_value: Optional[Decimal] = None
     invested_amount: Optional[Decimal] = None
+    points_invested: Optional[Decimal] = Field(None, description="Rakuten points used for this holding (BUYs)")
+    invested_amount_with_points: Optional[Decimal] = Field(None, description="Invested amount including points")
     unrealized_pl: Optional[Decimal] = None
     realized_pl: Optional[Decimal] = None
     xirr: Optional[Decimal] = Field(None, description="Internal rate of return (decimal, e.g., 0.1234 = 12.34%)")
