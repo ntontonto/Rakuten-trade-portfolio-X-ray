@@ -73,3 +73,6 @@ logs/
 
 # Alembic
 alembic/versions/*.pyc
+
+# Input CSV files (contain sensitive data)
+inputs/
