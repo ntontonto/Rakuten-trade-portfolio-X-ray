@@ -80,25 +80,25 @@ class TestXIRRCalculator:
 
         xirr = calculate_xirr(cash_flows)
 
-        # Should return 0 for insufficient data
-        assert xirr == 0.0
+        # Should return None for insufficient data
+        assert xirr is None
 
     def test_empty_cash_flows(self):
         """Test with no cash flows"""
         xirr = calculate_xirr([])
-        assert xirr == 0.0
+        assert xirr is None
 
     def test_portfolio_xirr_calculation(self):
         """Test portfolio-level XIRR with transaction format"""
         transactions = [
             {
                 'date': datetime(2023, 1, 1),
-                'amount': 1000,
+                'amount': -1000,
                 'side': 'BUY'
             },
             {
                 'date': datetime(2023, 6, 1),
-                'amount': 500,
+                'amount': -500,
                 'side': 'BUY'
             },
             {
