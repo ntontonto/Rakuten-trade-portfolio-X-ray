@@ -41,6 +41,8 @@ class PortfolioSummary(BaseModel):
     total_xirr: float = Field(..., description="Overall portfolio XIRR (annualized return)")
     total_current_value: float = Field(..., description="Current market value in JPY")
     total_invested: float = Field(..., description="Total amount invested in JPY")
+    points_invested: float = Field(..., description="Total Rakuten points used as investment")
+    total_invested_with_points: float = Field(..., description="Total invested including points")
     total_unrealized_pl: float = Field(..., description="Unrealized profit/loss in JPY")
     total_realized_pl: float = Field(..., description="Realized profit/loss in JPY")
     return_rate: float = Field(..., description="Simple return rate (not annualized)")
@@ -54,6 +56,8 @@ class PortfolioSummary(BaseModel):
                 "total_xirr": 0.1234,
                 "total_current_value": 5000000,
                 "total_invested": 4200000,
+                "points_invested": 15000,
+                "total_invested_with_points": 4215000,
                 "total_unrealized_pl": 800000,
                 "total_realized_pl": 50000,
                 "return_rate": 0.1905,

@@ -32,6 +32,8 @@ export interface Holding {
   current_price?: number;
   current_value?: number;
   invested_amount?: number;
+  points_invested?: number;
+  invested_amount_with_points?: number;
   unrealized_pl?: number;
   realized_pl?: number;
   xirr?: number;
@@ -49,6 +51,8 @@ export interface PortfolioSummary {
   total_xirr: number;
   total_current_value: number;
   total_invested: number;
+  points_invested: number;
+  total_invested_with_points: number;
   total_unrealized_pl: number;
   total_realized_pl: number;
   return_rate: number;
@@ -72,6 +76,8 @@ export interface PortfolioMetrics {
   total_xirr: number;
   total_current_value: number;
   total_invested: number;
+  points_invested: number;
+  total_invested_with_points: number;
   total_unrealized_pl: number;
   total_realized_pl: number;
   return_rate: number;

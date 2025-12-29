@@ -5,7 +5,7 @@ from typing import List
 from uuid import UUID
 
 from app.api.deps import get_db_session, get_portfolio
-from app.db.models import Portfolio, Holding
+from app.db.models import Portfolio, Holding, Transaction
 from app.schemas.portfolio import (
     PortfolioCreate,
     PortfolioUpdate,
@@ -103,6 +103,26 @@ def get_holdings(
         .filter(Holding.portfolio_id == portfolio.id)
         .all()
     )
+
+    # Sum points used per symbol from BUY transactions to enrich holdings
+    points_by_symbol = {}
+    transactions = (
+        db.query(Transaction)
+        .filter(Transaction.portfolio_id == portfolio.id)
+        .all()
+    )
+    for tx in transactions:
+        if tx.side != 'BUY':
+            continue
+        points_used = (tx.raw_data or {}).get('points_used', 0) or 0
+        points_by_symbol[tx.symbol] = points_by_symbol.get(tx.symbol, 0) + float(points_used)
+
+    for h in holdings:
+        points = points_by_symbol.get(h.symbol, 0.0)
+        h.points_invested = points
+        invested = float(h.invested_amount or 0)
+        h.invested_amount_with_points = invested + points
+
     return holdings
 
 
