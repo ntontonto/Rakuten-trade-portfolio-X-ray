@@ -12,6 +12,8 @@ Handles:
 Ported from JavaScript implementation (index.html lines 450-697)
 """
 import io
+import re
+import csv
 import pandas as pd
 import chardet
 from datetime import datetime
@@ -210,137 +212,6 @@ class CSVParser:
         print(f"資産データ抽出完了: {len(holdings)}件")
         return holdings, exchange_rates
 
-    def parse_transaction_history(self, df: pd.DataFrame) -> List[Dict]:
-        """
-        Parse transaction history CSV
-
-        Handles:
-        - US stocks (ティッカー)
-        - JP stocks (銘柄コード)
-        - Investment trusts (ファンド名)
-
-        Args:
-            df: DataFrame from CSV
-
-        Returns:
-            List of transaction dicts
-        """
-        transactions = []
-
-        # Detect header row
-        header_row_idx = -1
-        for idx in range(min(10, len(df))):
-            row = df.iloc[idx]
-            if '約定日' in row.values and ('銘柄名' in row.values or 'ティッカー' in row.values or 'ファンド名' in row.values):
-                header_row_idx = idx
-                break
-
-        if header_row_idx == -1:
-            return []  # Not a transaction history file
-
-        # Set header
-        headers = df.iloc[header_row_idx].tolist()
-        data_df = df.iloc[header_row_idx + 1:].copy()
-        data_df.columns = headers
-
-        # Determine market type
-        is_us = 'ティッカー' in headers
-        is_invst = 'ファンド名' in headers
-        is_jp = '銘柄コード' in headers and not is_us
-
-        file_type = '米国株' if is_us else ('投資信託' if is_invst else '日本株')
-        print(f"取引履歴ファイル検出: {file_type}")
-
-        # Check if quantity column has [口] unit
-        qty_header_with_unit = None
-        for header in headers:
-            if '数量' in str(header) and ('口' in str(header) or '［口］' in str(header)):
-                qty_header_with_unit = header
-                break
-        is_unit_kuchi = qty_header_with_unit is not None
-
-        # Process rows
-        for _, row in data_df.iterrows():
-            try:
-                # Skip empty rows
-                if row.isna().all():
-                    continue
-
-                tx = {}
-
-                if is_us:
-                    # US Stock Transaction
-                    tx['date'] = pd.to_datetime(row.get('約定日'), errors='coerce')
-                    tx['symbol'] = str(row.get('ティッカー', ''))
-                    tx['name'] = str(row.get('銘柄名', tx['symbol']))
-                    tx['type'] = str(row.get('売買区分', ''))
-                    tx['qty'] = parse_currency(str(row.get('数量［株］', 0)))
-
-                    # Amount in JPY
-                    amount_jpy_raw = row.get('受渡金額［円］')
-                    if pd.notna(amount_jpy_raw) and str(amount_jpy_raw) not in ['-', '']:
-                        tx['amount_jpy'] = parse_currency(str(amount_jpy_raw))
-                    else:
-                        usd = parse_currency(str(row.get('受渡金額［USドル］', 0)))
-                        rate = parse_currency(str(row.get('為替レート', 0)))
-                        tx['amount_jpy'] = abs(usd * rate)
-
-                    tx['market'] = 'US'
-
-                elif is_invst:
-                    # Investment Trust Transaction
-                    tx['date'] = pd.to_datetime(row.get('約定日'), errors='coerce')
-
-                    raw_name = str(row.get('ファンド名', ''))
-                    mapped_name = self.apply_name_mapping(raw_name)
-
-                    tx['symbol'] = mapped_name
-                    tx['name'] = mapped_name
-                    tx['type'] = str(row.get('取引', row.get('取引区分', '')))
-
-                    qty = parse_currency(str(row.get('数量［口］', 0)))
-                    if is_unit_kuchi:
-                        qty = qty / 10000  # Normalize to 万口 basis
-
-                    tx['qty'] = qty
-                    tx['amount_jpy'] = parse_currency(str(row.get('受渡金額/(ポイント利用)[円]', row.get('受渡金額［円］', 0))))
-                    tx['market'] = 'INVST'
-
-                elif is_jp:
-                    # Japanese Stock Transaction
-                    tx['date'] = pd.to_datetime(row.get('約定日'), errors='coerce')
-                    tx['symbol'] = str(row.get('銘柄コード', ''))
-                    tx['name'] = str(row.get('銘柄名', ''))
-                    tx['type'] = str(row.get('売買区分', ''))
-                    tx['qty'] = parse_currency(str(row.get('数量［株］', 0)))
-                    tx['amount_jpy'] = parse_currency(str(row.get('受渡金額［円］', 0)))
-                    tx['market'] = 'JP'
-
-                # Validate required fields
-                if pd.isna(tx.get('date')) or tx.get('amount_jpy', 0) <= 0:
-                    continue
-
-                # Determine side (BUY/SELL)
-                tx_type = str(tx.get('type', '')).strip()
-                if any(keyword in tx_type for keyword in ['買', '再投資', '積立']):
-                    tx['side'] = 'BUY'
-                elif any(keyword in tx_type for keyword in ['売', '解約']):
-                    tx['side'] = 'SELL'
-                else:
-                    tx['side'] = 'OTHER'
-
-                # Add asset classification (will be done in another service)
-                tx['asset_class'] = None  # To be classified later
-
-                transactions.append(tx)
-
-            except Exception as e:
-                # Skip problematic rows
-                continue
-
-        print(f"取引データ抽出: {len(transactions)}件")
-        return transactions
-
     def parse_file(self, file_content: bytes, filename: str) -> Dict:
         """
         Parse CSV file and determine type
@@ -381,19 +252,203 @@ class CSVParser:
                 'filename': filename
             }
 
-        elif '約定日' in df_str and any(keyword in df_str for keyword in ['銘柄名', 'ティッカー', 'ファンド名']):
-            # Transaction History File
-            transactions = self.parse_transaction_history(df)
-            return {
-                'type': 'transactions',
-                'data': transactions,
-                'filename': filename
-            }
+        # Decode via csv reader to preserve transaction formatting (esp. INVST points)
+        rows = self._read_rows(file_content, encoding)
+        tx_type, header_idx = self._detect_transaction_type(rows)
 
+        if tx_type == 'US':
+            transactions = self._parse_us_transactions(rows, header_idx)
+        elif tx_type == 'JP':
+            transactions = self._parse_jp_transactions(rows, header_idx)
+        elif tx_type == 'INVST':
+            transactions = self._parse_invst_transactions(rows, header_idx)
         else:
-            # Unknown file type
             return {
                 'type': 'unknown',
                 'data': [],
                 'filename': filename
             }
+
+        return {
+            'type': 'transactions',
+            'data': transactions,
+            'filename': filename
+        }
+
+    def _parse_amount_and_points(self, raw_value) -> Tuple[float, float]:
+        """
+        Split combined amount/points fields like '5,000(493)' into cash amount and points used.
+        """
+        if raw_value is None:
+            return 0.0, 0.0
+
+        raw_str = str(raw_value)
+        amount = parse_currency(raw_str)
+
+        points = 0.0
+        match = re.search(r'[（(]([0-9,.,]+)[)）]', raw_str)
+        if match:
+            points = parse_currency(match.group(1))
+
+        return amount, points
+
+    def _read_rows(self, file_content: bytes, encoding: str) -> List[List[str]]:
+        """
+        Read CSV content into a list of rows using Python's csv module to keep raw formatting.
+        """
+        text = file_content.decode(encoding, errors='replace')
+        reader = csv.reader(io.StringIO(text))
+        return [row for row in reader if row]
+
+    def _detect_transaction_type(self, rows: List[List[str]]) -> Tuple[Optional[str], int]:
+        """
+        Inspect header rows to decide which transaction parser to use.
+        Returns (tx_type, header_index) where tx_type is one of US/JP/INVST or None.
+        """
+        for idx, row in enumerate(rows[:10]):
+            header = ''.join(row)
+            has_date = any('約定日' in cell for cell in row)
+
+            if has_date and ('ティッカー' in header):
+                return 'US', idx
+            if has_date and ('銘柄コード' in header):
+                return 'JP', idx
+            if has_date and ('ファンド名' in header and '受渡金額/(ポイント利用)[円]' in header):
+                return 'INVST', idx
+        return None, -1
+
+    def _parse_us_transactions(self, rows: List[List[str]], header_idx: int) -> List[Dict]:
+        headers = rows[header_idx]
+        data_rows = rows[header_idx + 1:]
+        transactions = []
+
+        def get_value(row, column_name):
+            try:
+                col_idx = headers.index(column_name)
+                return row[col_idx] if col_idx < len(row) else ''
+            except ValueError:
+                return ''
+
+        for row in data_rows:
+            if not any(cell.strip() for cell in row):
+                continue
+
+            tx = {}
+            tx['date'] = pd.to_datetime(get_value(row, '約定日'), errors='coerce')
+            tx['symbol'] = str(get_value(row, 'ティッカー') or '')
+            tx['name'] = str(get_value(row, '銘柄名') or tx['symbol'])
+            tx['type'] = str(get_value(row, '売買区分') or '')
+            tx['qty'] = parse_currency(str(get_value(row, '数量［株］') or 0))
+
+            amount_jpy_raw = get_value(row, '受渡金額［円］')
+            if amount_jpy_raw not in ['-', '', None]:
+                tx['amount_jpy'] = parse_currency(str(amount_jpy_raw))
+            else:
+                usd = parse_currency(str(get_value(row, '受渡金額［USドル］') or get_value(row, '約定代金［USドル］') or 0))
+                rate = parse_currency(str(get_value(row, '為替レート') or 0))
+                tx['amount_jpy'] = abs(usd * rate)
+
+            tx['market'] = 'US'
+            self._finalize_transaction(tx)
+            if tx:
+                transactions.append(tx)
+
+        print(f"取引データ抽出(US): {len(transactions)}件")
+        return transactions
+
+    def _parse_jp_transactions(self, rows: List[List[str]], header_idx: int) -> List[Dict]:
+        headers = rows[header_idx]
+        data_rows = rows[header_idx + 1:]
+        transactions = []
+
+        def get_value(row, column_name):
+            try:
+                col_idx = headers.index(column_name)
+                return row[col_idx] if col_idx < len(row) else ''
+            except ValueError:
+                return ''
+
+        for row in data_rows:
+            if not any(cell.strip() for cell in row):
+                continue
+
+            tx = {}
+            tx['date'] = pd.to_datetime(get_value(row, '約定日'), errors='coerce')
+            tx['symbol'] = str(get_value(row, '銘柄コード') or '')
+            tx['name'] = str(get_value(row, '銘柄名') or '')
+            tx['type'] = str(get_value(row, '売買区分') or '')
+            tx['qty'] = parse_currency(str(get_value(row, '数量［株］') or 0))
+            tx['amount_jpy'] = parse_currency(str(get_value(row, '受渡金額［円］') or 0))
+            tx['market'] = 'JP'
+
+            self._finalize_transaction(tx)
+            if tx:
+                transactions.append(tx)
+
+        print(f"取引データ抽出(JP): {len(transactions)}件")
+        return transactions
+
+    def _parse_invst_transactions(self, rows: List[List[str]], header_idx: int) -> List[Dict]:
+        headers = rows[header_idx]
+        data_rows = rows[header_idx + 1:]
+        transactions = []
+
+        def get_value(row, column_name):
+            try:
+                col_idx = headers.index(column_name)
+                return row[col_idx] if col_idx < len(row) else ''
+            except ValueError:
+                return ''
+
+        # Check if quantity uses "口" units to normalize
+        qty_header = next((h for h in headers if '数量' in h and '口' in h), None)
+        normalize_kuchi = qty_header is not None
+
+        for row in data_rows:
+            if not any(cell.strip() for cell in row):
+                continue
+
+            tx = {}
+            tx['date'] = pd.to_datetime(get_value(row, '約定日'), errors='coerce')
+
+            raw_name = str(get_value(row, 'ファンド名') or '')
+            mapped_name = self.apply_name_mapping(raw_name)
+            tx['symbol'] = mapped_name
+            tx['name'] = mapped_name
+            tx['type'] = str(get_value(row, '取引') or get_value(row, '取引区分') or '')
+
+            qty = parse_currency(str(get_value(row, '数量［口］') or 0))
+            if normalize_kuchi:
+                qty = qty / 10000  # Normalize to 万口 basis
+            tx['qty'] = qty
+
+            raw_amount = get_value(row, '受渡金額/(ポイント利用)[円]') or get_value(row, '受渡金額［円］')
+            amount_jpy, points_used = self._parse_amount_and_points(raw_amount)
+            tx['amount_jpy'] = amount_jpy
+            tx['points_used'] = points_used
+            tx['market'] = 'INVST'
+
+            self._finalize_transaction(tx)
+            if tx:
+                transactions.append(tx)
+
+        print(f"取引データ抽出(INVST): {len(transactions)}件")
+        return transactions
+
+    def _finalize_transaction(self, tx: Dict) -> None:
+        """
+        Normalize side/validation; mutates tx or clears it if invalid.
+        """
+        if pd.isna(tx.get('date')) or tx.get('amount_jpy', 0) <= 0:
+            tx.clear()
+            return
+
+        tx_type = str(tx.get('type', '')).strip()
+        if any(keyword in tx_type for keyword in ['買', '再投資', '積立']):
+            tx['side'] = 'BUY'
+        elif any(keyword in tx_type for keyword in ['売', '解約']):
+            tx['side'] = 'SELL'
+        else:
+            tx['side'] = 'OTHER'
+
+        tx['asset_class'] = None  # Classified later

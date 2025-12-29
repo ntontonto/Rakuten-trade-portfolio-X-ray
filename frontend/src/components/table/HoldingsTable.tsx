@@ -97,6 +97,7 @@ export default function HoldingsTable({ holdings }: HoldingsTableProps) {
               <th>戦略</th>
               <th className="text-right">保有数量</th>
               <th className="text-right">平均取得単価</th>
+              <th className="text-right">累積投資額（ポイント含む）</th>
               <th className="text-right bg-blue-50 border-l border-blue-100">
                 現在単価 (編集可)
               </th>
@@ -150,6 +151,16 @@ export default function HoldingsTable({ holdings }: HoldingsTableProps) {
                 {/* Average Cost */}
                 <td className="text-right text-sm">
                   {formatCurrency(holding.average_cost)}
+                </td>
+
+                {/* Invested incl. points */}
+                <td className="text-right text-sm">
+                  <div className="font-semibold text-slate-700">
+                    {formatCurrency(holding.invested_amount_with_points)}
+                  </div>
+                  <div className="text-[11px] text-slate-400">
+                    内ポイント: {formatCurrency(holding.points_invested)}
+                  </div>
                 </td>
 
                 {/* Current Price (Editable) */}

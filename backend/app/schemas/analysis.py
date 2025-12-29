@@ -65,6 +65,8 @@ class PortfolioMetrics(BaseModel):
     total_xirr: float
     total_current_value: float
     total_invested: float
+    points_invested: float
+    total_invested_with_points: float
     total_unrealized_pl: float
     total_realized_pl: float
     return_rate: float
