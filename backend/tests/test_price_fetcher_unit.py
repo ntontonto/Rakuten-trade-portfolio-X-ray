@@ -18,6 +18,7 @@ class FakeSession:
 
     def __init__(self, items):
         self.items = items
+        self._added = []
 
     def query(self, _model):
         return self
@@ -30,6 +31,22 @@ class FakeSession:
 
     def all(self):
         return self.items
+
+    def first(self):
+        """Return first item or None"""
+        return None
+
+    def add(self, obj):
+        """Add object to session"""
+        self._added.append(obj)
+
+    def commit(self):
+        """Commit transaction (no-op in mock)"""
+        pass
+
+    def rollback(self):
+        """Rollback transaction (no-op in mock)"""
+        pass
 
 
 class StubFetcher:

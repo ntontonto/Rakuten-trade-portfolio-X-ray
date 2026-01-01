@@ -1,7 +1,7 @@
 """Analysis and Charts Endpoints"""
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from uuid import UUID
 from datetime import datetime, date, timedelta
 from collections import defaultdict
@@ -202,7 +202,9 @@ def get_portfolio_metrics(
             'name': h.name,
             'holding_days': h.holding_days or 0,
             'xirr': float(h.xirr or 0),
-            'current_value': float(h.current_value or 0)
+            'current_value': float(h.current_value or 0),
+            'asset_class': h.asset_class or 'Other',
+            'strategy': h.strategy or 'Other',
         }
         for h in holdings if h.xirr is not None
     ]
@@ -450,8 +452,8 @@ def _build_price_map(
 def get_holding_price_history(
     portfolio_id: UUID,
     symbol: str,
-    start_date: date | None = None,
-    end_date: date | None = None,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
     frequency: str = "daily",  # 'daily', 'weekly', 'monthly'
     portfolio: Portfolio = Depends(get_portfolio),
     db: Session = Depends(get_db_session)
@@ -599,8 +601,8 @@ def get_holding_price_history(
 )
 def get_portfolio_timeline(
     portfolio_id: UUID,
-    start_date: date | None = None,
-    end_date: date | None = None,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
     portfolio: Portfolio = Depends(get_portfolio),
     db: Session = Depends(get_db_session)
 ):

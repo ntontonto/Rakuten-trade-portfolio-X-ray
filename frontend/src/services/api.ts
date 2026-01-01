@@ -9,6 +9,7 @@ import type {
   UploadResponse,
   PriceHistoryResponse,
   PortfolioTimelineResponse,
+  AIInsightResponse,
 } from '../types';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api/v1';
@@ -88,8 +89,10 @@ export const portfolioAPI = {
   },
 
   // Generate AI insights
-  generateInsights: async (portfolioId: string): Promise<{ insights: string }> => {
-    const response = await api.post('/ai/insights', { portfolio_id: portfolioId });
+  generateInsights: async (portfolioId: string): Promise<AIInsightResponse> => {
+    const response = await api.post<AIInsightResponse>('/ai/insights', {
+      portfolio_id: portfolioId,
+    });
     return response.data;
   },
 
