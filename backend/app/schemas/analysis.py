@@ -142,3 +142,78 @@ class PortfolioMetrics(BaseModel):
                 ]
             }
         }
+
+
+class PriceHistoryPoint(BaseModel):
+    """Single data point for a holding's price/value history"""
+    date: date
+    price_jpy: Optional[float] = Field(
+        None, description="Price converted to JPY when available"
+    )
+    price_raw: float = Field(
+        ..., description="Raw price in the asset's trading currency"
+    )
+    fx_rate: Optional[float] = Field(
+        None, description="FX rate used (JPY per unit of raw currency)"
+    )
+    quantity: Optional[float] = Field(
+        None, description="Quantity held on this date (after transactions)"
+    )
+    value_jpy: Optional[float] = Field(
+        None, description="Position value in JPY (price_jpy * quantity)"
+    )
+
+
+class PriceHistoryResponse(BaseModel):
+    """Price history response for a holding"""
+    source: str = Field(..., description="Data source: yahoo, nav, interpolated, none")
+    currency: str = Field(..., description="Raw price currency, e.g., USD or JPY")
+    points: List[PriceHistoryPoint]
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "source": "yahoo",
+                "currency": "USD",
+                "points": [
+                    {
+                        "date": "2024-01-01",
+                        "price_raw": 100.5,
+                        "fx_rate": 150.2,
+                        "price_jpy": 15030.1,
+                        "quantity": 12.3,
+                        "value_jpy": 184869.23
+                    }
+                ]
+            }
+        }
+
+
+class PortfolioTimelinePoint(BaseModel):
+    """Daily portfolio timeline point"""
+    date: date
+    invested_cumulative_jpy: float
+    total_value_jpy: float
+
+
+class PortfolioTimelineResponse(BaseModel):
+    """Daily cumulative invested vs total portfolio value"""
+    points: List[PortfolioTimelinePoint]
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "points": [
+                    {
+                        "date": "2024-01-01",
+                        "invested_cumulative_jpy": 100000,
+                        "total_value_jpy": 105000
+                    },
+                    {
+                        "date": "2024-01-02",
+                        "invested_cumulative_jpy": 150000,
+                        "total_value_jpy": 152500
+                    }
+                ]
+            }
+        }

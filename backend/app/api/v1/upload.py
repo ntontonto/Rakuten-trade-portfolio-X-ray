@@ -10,7 +10,7 @@ from app.services.csv_parser import CSVParser
 from app.services.portfolio_aggregator import PortfolioAggregator
 from app.services.balance_merger import BalanceMerger
 from app.services.asset_classifier import classify_asset
-from app.db.models import Portfolio, Transaction
+from app.db.models import Portfolio, Transaction, Holding
 from app.config import settings
 
 router = APIRouter(prefix="/upload", tags=["upload"])
@@ -72,6 +72,7 @@ async def upload_csv_files(
 
     # Get or create portfolio
     if portfolio_id:
+        # Use specified portfolio
         portfolio = db.query(Portfolio).filter(Portfolio.id == portfolio_id).first()
         if not portfolio:
             raise HTTPException(
@@ -79,12 +80,34 @@ async def upload_csv_files(
                 detail=f"Portfolio {portfolio_id} not found"
             )
     else:
-        # Create new portfolio
-        portfolio = Portfolio(name="Main Portfolio")
-        db.add(portfolio)
+        # Check if a portfolio already exists (reuse it to avoid duplicates)
+        existing_portfolio = db.query(Portfolio).first()
+        if existing_portfolio:
+            # Reuse existing portfolio
+            portfolio = existing_portfolio
+            portfolio_id = portfolio.id
+            print(f"♻️ Reusing existing portfolio: {portfolio_id}")
+        else:
+            # Create new portfolio (first time upload)
+            portfolio = Portfolio(name="Main Portfolio")
+            db.add(portfolio)
+            db.commit()
+            db.refresh(portfolio)
+            portfolio_id = portfolio.id
+            print(f"✨ Created new portfolio: {portfolio_id}")
+
+    # Clear existing data for idempotent uploads (replace, not append)
+    if portfolio_id:
+        # Delete existing holdings (will be recalculated from transactions)
+        deleted_holdings = db.query(Holding).filter(Holding.portfolio_id == portfolio_id).delete()
+
+        # Delete existing transactions (will be recreated from CSV)
+        deleted_transactions = db.query(Transaction).filter(Transaction.portfolio_id == portfolio_id).delete()
+
         db.commit()
-        db.refresh(portfolio)
-        portfolio_id = portfolio.id
+
+        if deleted_transactions > 0 or deleted_holdings > 0:
+            print(f"🗑️  Cleared existing data: {deleted_transactions} transactions, {deleted_holdings} holdings")
 
     # Initialize services
     parser = CSVParser()
@@ -180,13 +203,17 @@ async def upload_csv_files(
     # Get portfolio summary
     summary = aggregator.get_portfolio_summary(portfolio_id)
 
+    # Determine if data was replaced or created fresh
+    data_replaced = deleted_transactions > 0 or deleted_holdings > 0 if 'deleted_transactions' in locals() else False
+
     return {
         "success": True,
-        "message": f"Processed {len(files)} file(s) successfully",
+        "message": f"Processed {len(files)} file(s) successfully. {'All previous data replaced.' if data_replaced else 'New portfolio created.'}",
         "portfolio_id": str(portfolio_id),
         "files_processed": parsed_files,
         "transactions_imported": len(all_transactions),
         "holdings_created": len(holdings),
         "balance_merge": merge_stats,
-        "summary": summary
+        "summary": summary,
+        "data_replaced": data_replaced
     }

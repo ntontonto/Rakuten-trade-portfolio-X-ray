@@ -12,6 +12,7 @@ import CumulativeStrategyChart from '../charts/CumulativeStrategyChart';
 import WinRateChart from '../charts/WinRateChart';
 import ScatterChart from '../charts/ScatterChart';
 import AIInsightPanel from '../ai/AIInsightPanel';
+import PortfolioTimelineChart from '../charts/PortfolioTimelineChart';
 
 export default function Dashboard() {
   const { summary, holdings, metrics, isLoading } = usePortfolioStore();
@@ -72,6 +73,12 @@ export default function Dashboard() {
           </div>
         </div>
         <HoldingsTable holdings={holdings} />
+      </section>
+
+      {/* Portfolio Timeline */}
+      <section>
+        <h3 className="text-xl font-bold text-slate-800 mb-4">ポートフォリオ推移</h3>
+        <PortfolioTimelineChart />
       </section>
 
       {/* Charts Section */}

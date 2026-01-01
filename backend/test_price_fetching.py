@@ -13,11 +13,10 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from app.services.price_fetcher import (
     YahooFinanceFetcher,
-    ProxyIndexEstimator,
     LinearInterpolator,
     ExchangeRateService
 )
-from app.services.ticker_mappings import get_yahoo_ticker, get_proxy_info
+from app.services.ticker_mappings import get_yahoo_ticker
 
 
 def test_tier1_yahoo_finance():
@@ -48,52 +47,6 @@ def test_tier1_yahoo_finance():
             print(f"   Last:  {prices.index[-1].date()} = ¥{prices.iloc[-1]['price']:.2f}")
         else:
             print(f"   ❌ Failed to fetch")
-
-
-def test_tier2_proxy_estimation():
-    """Test Tier 2: Proxy Index Estimation"""
-    print("\n" + "=" * 80)
-    print("TEST 2: PROXY INDEX ESTIMATION (Tier 2)")
-    print("=" * 80)
-
-    yahoo_fetcher = YahooFinanceFetcher()
-    proxy_estimator = ProxyIndexEstimator(yahoo_fetcher)
-
-    # Test with real fund from portfolio
-    fund_name = "eMAXIS Slim 米国株式(S&P500)"
-    proxy_info = get_proxy_info(fund_name)
-
-    print(f"\n📊 Testing fund: {fund_name}")
-    print(f"   Proxy: {proxy_info['proxy']} ({proxy_info['name']})")
-    print(f"   Expected correlation: {proxy_info['correlation']}")
-
-    # Reference: First purchase on 2020-12-02 at NAV ¥13,145
-    reference_price = 13145.0
-    reference_date = date(2020, 12, 2)
-
-    start_date = date(2020, 12, 1)
-    end_date = date(2021, 3, 31)
-
-    estimated_prices = proxy_estimator.estimate(
-        fund_name,
-        start_date,
-        end_date,
-        reference_price,
-        reference_date
-    )
-
-    if estimated_prices is not None:
-        print(f"   ✅ Success: {len(estimated_prices)} estimated prices")
-        print(f"   First: {estimated_prices.index[0]} = ¥{estimated_prices.iloc[0]['price']:.2f}")
-        print(f"   Last:  {estimated_prices.index[-1]} = ¥{estimated_prices.iloc[-1]['price']:.2f}")
-
-        # Show a few sample points
-        print(f"\n   Sample estimates:")
-        for i in [0, len(estimated_prices)//2, -1]:
-            row = estimated_prices.iloc[i]
-            print(f"      {estimated_prices.index[i]}: ¥{row['price']:.2f}")
-    else:
-        print(f"   ❌ Failed to estimate")
 
 
 def test_exchange_rates():
@@ -153,15 +106,11 @@ def test_ticker_mappings():
         # Check Yahoo direct
         yahoo_ticker = get_yahoo_ticker(symbol)
 
-        # Check proxy
-        proxy_info = get_proxy_info(symbol)
-
         if yahoo_ticker:
             print(f"   ✅ {symbol:40s} → Yahoo: {yahoo_ticker}")
-        elif proxy_info:
-            print(f"   ✅ {symbol:40s} → Proxy: {proxy_info['proxy']} ({proxy_info['name']})")
         else:
             print(f"   ⚠️  {symbol:40s} → No mapping (will use interpolation)")
+
 
 
 def main():
@@ -171,14 +120,13 @@ def main():
     print("=" * 80)
     print("\nTesting multi-tier price fetching system:")
     print("  Tier 1: Yahoo Finance (direct tickers)")
-    print("  Tier 2: Proxy Index Estimation (mutual funds)")
+    print("  Tier 2: Official NAV (mutual funds)")
     print("  Tier 3: Linear Interpolation (fallback)")
 
     try:
         # Test each tier
         test_ticker_mappings()
         test_tier1_yahoo_finance()
-        test_tier2_proxy_estimation()
         test_exchange_rates()
 
         print("\n" + "=" * 80)

@@ -6,6 +6,8 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
+    curl \
+    wget \
     postgresql-client \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -14,6 +16,8 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
+# Install Playwright browsers (Chromium) with dependencies
+RUN python -m playwright install --with-deps chromium
 
 # Copy application
 COPY . .

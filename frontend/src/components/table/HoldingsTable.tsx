@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { Holding } from '../../types';
 import { usePortfolioStore } from '../../stores/portfolioStore';
 import { portfolioAPI } from '../../services/api';
+import AssetDetail from '../detail/AssetDetail';
 
 interface HoldingsTableProps {
   holdings: Holding[];
@@ -12,6 +13,7 @@ export default function HoldingsTable({ holdings }: HoldingsTableProps) {
   const [searchTerm, setSearchTerm] = useState('');
   const [editingSymbol, setEditingSymbol] = useState<string | null>(null);
   const [editPrice, setEditPrice] = useState('');
+  const [selectedHolding, setSelectedHolding] = useState<Holding | null>(null);
 
   const formatNumber = (value?: number, decimals = 2) => {
     if (value === undefined || value === null) return '-';
@@ -112,14 +114,18 @@ export default function HoldingsTable({ holdings }: HoldingsTableProps) {
               <tr key={holding.id} className="hover:bg-slate-50 transition-colors">
                 {/* Name */}
                 <td>
-                  <div className="font-bold text-slate-700 flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedHolding(holding)}
+                    className="font-bold text-slate-700 flex items-center gap-2 hover:text-blue-700"
+                  >
                     {holding.name}
                     {holding.is_price_auto_updated && (
                       <span className="text-[10px] bg-green-100 text-green-700 px-1.5 py-0.5 rounded border border-green-200">
                         自動
                       </span>
                     )}
-                  </div>
+                  </button>
                   <div className="text-xs text-slate-400">{holding.symbol}</div>
                 </td>
 
@@ -234,6 +240,14 @@ export default function HoldingsTable({ holdings }: HoldingsTableProps) {
         <div className="p-8 text-center text-slate-500">
           {searchTerm ? '検索結果がありません' : '保有銘柄がありません'}
         </div>
+      )}
+
+      {selectedHolding && currentPortfolio && (
+        <AssetDetail
+          holding={selectedHolding}
+          portfolioId={currentPortfolio.id}
+          onClose={() => setSelectedHolding(null)}
+        />
       )}
     </div>
   );

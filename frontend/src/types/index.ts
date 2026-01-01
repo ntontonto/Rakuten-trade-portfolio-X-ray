@@ -99,6 +99,31 @@ export interface PortfolioMetrics {
   }>;
 }
 
+export interface PriceHistoryPoint {
+  date: string;
+  price_jpy?: number;
+  price_raw: number;
+  fx_rate?: number;
+  quantity?: number;
+  value_jpy?: number;
+}
+
+export interface PriceHistoryResponse {
+  source: string;
+  currency: string;
+  points: PriceHistoryPoint[];
+}
+
+export interface PortfolioTimelinePoint {
+  date: string;
+  invested_cumulative_jpy: number;
+  total_value_jpy: number;
+}
+
+export interface PortfolioTimelineResponse {
+  points: PortfolioTimelinePoint[];
+}
+
 export interface UploadResponse {
   success: boolean;
   message: string;
