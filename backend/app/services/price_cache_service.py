@@ -73,13 +73,21 @@ class PriceCacheService:
                 print(f"✅ [Cache] Hit - returning {len(cached_df)} cached rows")
                 return cached_df, 'cache'
             elif is_complete and not is_fresh:
-                print(f"⚠️ [Cache] Stale - updating recent data")
-                # Update forward (get new data since last cached date)
-                self._update_forward(symbol, ticker, source)
-                # Re-fetch from cache
-                cached_df = self._get_cached_data(symbol, ticker, start_date, end_date, source)
-                if cached_df is not None and len(cached_df) > 0:
-                    print(f"✅ [Cache] Updated - returning {len(cached_df)} rows")
+                last_cached = cached_df.index[-1].date()
+
+                # Check if recent enough to skip update
+                if self._should_update_forward(last_cached):
+                    print(f"⚠️ [Cache] Stale - updating recent data")
+                    # Update forward (get new data since last cached date)
+                    self._update_forward(symbol, ticker, source)
+                    # Re-fetch from cache
+                    cached_df = self._get_cached_data(symbol, ticker, start_date, end_date, source)
+                    if cached_df is not None and len(cached_df) > 0:
+                        print(f"✅ [Cache] Updated - returning {len(cached_df)} rows")
+                        return cached_df, 'cache'
+                else:
+                    # Recent enough - return as-is
+                    print(f"✅ [Cache] Returning {len(cached_df)} cached rows (recent enough)")
                     return cached_df, 'cache'
             else:
                 print(f"⚠️ [Cache] Incomplete - but using cached data")
@@ -89,8 +97,16 @@ class PriceCacheService:
 
                 last_cached = cached_df.index[-1].date()
                 today = date.today()
-                # Only update forward if we're missing trading days (not just today)
-                if last_cached < end_date and (end_date - last_cached).days > 1 and last_cached < today - timedelta(days=1):
+
+                # Check if we should update forward
+                should_update = (
+                    last_cached < end_date
+                    and (end_date - last_cached).days > 1
+                    and last_cached < today - timedelta(days=1)
+                    and self._should_update_forward(last_cached)  # New condition
+                )
+
+                if should_update:
                     # Fill recent forward gaps (but not today, which may not have data yet)
                     print(f"📈 [Cache] Updating recent data: {last_cached} to {min(end_date, today - timedelta(days=1))}")
                     self._update_forward(symbol, ticker, source)
@@ -216,6 +232,29 @@ class PriceCacheService:
                 return False  # Last month: re-verify weekly
             # Historical data (>30 days): always fresh
 
+        return True
+
+    def _should_update_forward(self, last_cached_date: date) -> bool:
+        """
+        Forward updateを実行すべきか判定
+
+        Args:
+            last_cached_date: 最後のキャッシュデータの日付
+
+        Returns:
+            True: Forward updateを実行すべき
+            False: 十分新しいのでスキップ
+        """
+        today = date.today()
+        days_since_last = (today - last_cached_date).days
+
+        # 最後のキャッシュが7日以内なら更新不要
+        # 理由: 週末・祝日を考慮すると、7日以内なら実質最新
+        if days_since_last <= 7:
+            print(f"⏭️  [Cache] Skip forward update - last cached {days_since_last} days ago (recent enough)")
+            return False
+
+        print(f"📅 [Cache] Last cached {days_since_last} days ago - will update forward")
         return True
 
     def _identify_missing_ranges(
