@@ -65,6 +65,11 @@ class PriceCacheService:
         cached_df = self._get_cached_data(symbol, ticker, start_date, end_date, source)
 
         if cached_df is not None and len(cached_df) > 0:
+            if source in {"alt"}:
+                # Non-scrapable source: return cached data as-is without any fill attempts
+                print(f"✅ [Cache] Hit ({source}) - returning {len(cached_df)} cached rows (cache-only)")
+                return cached_df, 'cache'
+
             # Check if cache is complete and fresh
             is_complete = self._is_cache_complete(cached_df, start_date, end_date)
             is_fresh = self._is_cache_fresh(cached_df, end_date)
@@ -119,6 +124,12 @@ class PriceCacheService:
 
         # Cache miss - prioritize recent data first
         print(f"❌ [Cache] Miss - fetching data incrementally")
+        if source in {"alt"}:
+            # Alt has no scraper here; caller (price_fetcher) will try other tiers or interpolation
+            return None, source
+        if source in {"yahoo"}:
+            # Let caller fall through to next source (e.g., alt) instead of scraping here
+            return None, source
         return self._scrape_and_cache_smart(symbol, ticker, start_date, end_date, source)
 
     def _get_cached_data(
