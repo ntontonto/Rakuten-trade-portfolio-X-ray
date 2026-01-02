@@ -10,6 +10,7 @@ import type {
   PriceHistoryResponse,
   PortfolioTimelineResponse,
   AIInsightResponse,
+  InvestmentTimelineResponse,
 } from '../types';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api/v1';
@@ -93,6 +94,19 @@ export const portfolioAPI = {
     const response = await api.post<AIInsightResponse>('/ai/insights', {
       portfolio_id: portfolioId,
     });
+    return response.data;
+  },
+
+  // Get investment vs valuation timeline (daily)
+  getInvestmentTimeline: async (
+    portfolioId: string,
+    symbol: string,
+    params?: { start_date?: string; end_date?: string }
+  ): Promise<InvestmentTimelineResponse> => {
+    const response = await api.get<InvestmentTimelineResponse>(
+      `/portfolios/${portfolioId}/holdings/${symbol}/investment-timeline`,
+      { params }
+    );
     return response.data;
   },
 

@@ -217,3 +217,25 @@ class PortfolioTimelineResponse(BaseModel):
                 ]
             }
         }
+
+
+class InvestmentTimelinePoint(BaseModel):
+    """Per-day invested vs valuation for a holding"""
+    date: date
+    invested_cumulative_jpy: float
+    value_jpy: float
+
+
+class InvestmentTimelineResponse(BaseModel):
+    """Daily investment vs valuation timeline for a holding"""
+    points: List[InvestmentTimelinePoint]
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "points": [
+                    {"date": "2024-01-01", "invested_cumulative_jpy": 100000, "value_jpy": 102500},
+                    {"date": "2024-01-02", "invested_cumulative_jpy": 120000, "value_jpy": 125000}
+                ]
+            }
+        }
