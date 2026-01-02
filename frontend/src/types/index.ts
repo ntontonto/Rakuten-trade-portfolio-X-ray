@@ -61,15 +61,15 @@ export interface PortfolioSummary {
 }
 
 export interface AllocationData {
-  asset_class: string;
-  percentage: number;
-  total_value: number;
+  labels: string[];
+  values: number[];
+  colors: string[];
 }
 
 export interface StrategyAllocation {
-  strategy: string;
-  percentage: number;
-  total_value: number;
+  labels: string[];
+  values: number[];
+  colors: string[];
 }
 
 export interface PortfolioMetrics {
@@ -81,22 +81,54 @@ export interface PortfolioMetrics {
   total_unrealized_pl: number;
   total_realized_pl: number;
   return_rate: number;
-  allocation_by_class: AllocationData[];
-  allocation_by_strategy: StrategyAllocation[];
-  xirr_by_class: Array<{ asset_class: string; xirr: number }>;
-  monthly_flow: Record<string, { core: number; satellite: number }>; // Backend returns object with monthly data
+  allocation_by_class: AllocationData;
+  allocation_by_strategy: StrategyAllocation;
+  xirr_by_class: Record<string, number>;
+  monthly_flow: Record<string, { core: number; satellite: number }>;
   top_performers: Array<{ symbol: string; name: string; xirr: number; current_value: number }>;
-  realized_pl_by_class?: Record<string, number>; // Backend returns object/dict, not array
-  cumulative_strategy?: { months: string[]; core: number[]; satellite: number[] }; // Backend returns object with arrays
-  win_rate?: { total: number; winning: number; rate: number }; // Backend returns object with total, winning, rate
-  scatter_data?: Array<{
+  realized_pl_by_class: Record<string, number>;
+  cumulative_strategy: { months: string[]; core: number[]; satellite: number[] };
+  win_rate: { total: number; winning: number; rate: number };
+  scatter_data: Array<{
     symbol: string;
     name: string;
     holding_days: number;
     xirr: number;
     current_value: number;
-    asset_class: string;
+    asset_class?: string;
+    strategy?: string;
   }>;
+}
+
+export interface PriceHistoryPoint {
+  date: string;
+  price_jpy?: number;
+  price_raw: number;
+  fx_rate?: number;
+  quantity?: number;
+  value_jpy?: number;
+}
+
+export interface PriceHistoryResponse {
+  source: string;
+  currency: string;
+  points: PriceHistoryPoint[];
+}
+
+export interface PortfolioTimelinePoint {
+  date: string;
+  invested_cumulative_jpy: number;
+  total_value_jpy: number;
+}
+
+export interface PortfolioTimelineResponse {
+  points: PortfolioTimelinePoint[];
+}
+
+export interface AIInsightResponse {
+  status: 'success' | 'error' | string;
+  report: string;
+  generated_at: string;
 }
 
 export interface UploadResponse {

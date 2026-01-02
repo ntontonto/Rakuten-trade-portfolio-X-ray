@@ -3,22 +3,31 @@ import { Sparkles, Loader2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { portfolioAPI } from '../../services/api';
 import { usePortfolioStore } from '../../stores/portfolioStore';
+import type { AIInsightResponse } from '../../types';
 
 export default function AIInsightPanel() {
   const { currentPortfolio } = usePortfolioStore();
   const [insights, setInsights] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [meta, setMeta] = useState<Pick<AIInsightResponse, 'generated_at' | 'status'> | null>(null);
 
   const generateInsights = async () => {
     if (!currentPortfolio) return;
 
     setIsLoading(true);
     setError(null);
+    setMeta(null);
+    setInsights(null);
 
     try {
       const result = await portfolioAPI.generateInsights(currentPortfolio.id);
-      setInsights(result.insights);
+      if (result.status !== 'success') {
+        setError(result.report || 'AI分析に失敗しました');
+        return;
+      }
+      setInsights(result.report);
+      setMeta({ generated_at: result.generated_at, status: result.status });
     } catch (err: any) {
       console.error('Failed to generate insights:', err);
       setError(err.response?.data?.detail || 'AI分析に失敗しました');
@@ -63,6 +72,11 @@ export default function AIInsightPanel() {
 
       {insights ? (
         <div className="bg-white rounded-lg p-5 prose prose-sm max-w-none">
+          {meta?.generated_at && (
+            <p className="text-xs text-slate-400 mb-2">
+              生成日時: {new Date(meta.generated_at).toLocaleString()}
+            </p>
+          )}
           <ReactMarkdown>{insights}</ReactMarkdown>
         </div>
       ) : (

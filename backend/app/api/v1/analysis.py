@@ -1,9 +1,9 @@
 """Analysis and Charts Endpoints"""
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 from uuid import UUID
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from collections import defaultdict
 
 from app.api.deps import get_db_session, get_portfolio
@@ -13,11 +13,15 @@ from app.schemas.analysis import (
     XIRRResponse,
     PortfolioMetrics,
     AllocationData,
-    ChartData
+    ChartData,
+    PriceHistoryResponse,
+    PortfolioTimelineResponse,
+    PortfolioTimelinePoint
 )
 from app.services.xirr_calculator import CashFlow, calculate_xirr, format_xirr
 from app.services.asset_classifier import get_asset_class_color, get_strategy_color
 from app.services.portfolio_aggregator import PortfolioAggregator
+from app.services.price_fetcher import HistoricalPriceService
 
 router = APIRouter(tags=["analysis"])
 
@@ -198,7 +202,9 @@ def get_portfolio_metrics(
             'name': h.name,
             'holding_days': h.holding_days or 0,
             'xirr': float(h.xirr or 0),
-            'current_value': float(h.current_value or 0)
+            'current_value': float(h.current_value or 0),
+            'asset_class': h.asset_class or 'Other',
+            'strategy': h.strategy or 'Other',
         }
         for h in holdings if h.xirr is not None
     ]
@@ -365,3 +371,322 @@ def get_top_performers(
             "symbols": [h.symbol for h in holdings]
         }
     )
+
+
+def _build_quantity_map(transactions, start_date: date, end_date: date):
+    """Build daily cumulative quantity map from transactions."""
+    by_date = defaultdict(float)
+    for tx in transactions:
+        delta = float(tx.quantity)
+        if tx.side == 'SELL':
+            delta = -delta
+        elif tx.side != 'BUY':
+            delta = 0.0
+        by_date[tx.transaction_date] += delta
+
+    qty_map = {}
+    current = 0.0
+    current_date = start_date
+    while current_date <= end_date:
+        current += by_date.get(current_date, 0.0)
+        qty_map[current_date] = current
+        current_date += timedelta(days=1)
+
+    return qty_map
+
+
+def _build_price_map(
+    price_service: HistoricalPriceService,
+    holding: Holding,
+    start_date: date,
+    end_date: date,
+    fx_map: Dict[date, float],
+    transactions: List[Transaction]
+):
+    """Fetch price history once and convert to JPY map."""
+    prices, source = price_service.get_price_history(
+        symbol=holding.symbol,
+        name=holding.name,
+        start_date=start_date,
+        end_date=end_date,
+        portfolio_id=str(holding.portfolio_id)
+    )
+    price_map: Dict[date, float] = {}
+    if prices is None or prices.empty:
+        # Fallback: pure interpolation on transaction prices
+        interp_df = price_service.interpolator.interpolate(transactions, start_date, end_date)
+        if interp_df is None or interp_df.empty:
+            return price_map, source
+        prices = interp_df
+        source = source or 'interpolated'
+
+    # For US holdings, forward-fill missing FX rates to avoid gaps
+    if holding.market == 'US' and fx_map:
+        filled_fx_map = {}
+        last_fx = None
+        current_date = start_date
+        while current_date <= end_date:
+            if current_date in fx_map:
+                last_fx = fx_map[current_date]
+            if last_fx is not None:
+                filled_fx_map[current_date] = last_fx
+            current_date += timedelta(days=1)
+        fx_map = filled_fx_map
+
+    for idx, row in prices.iterrows():
+        d = idx.date() if hasattr(idx, "date") else idx
+        raw = float(row['price'])
+        if holding.market == 'US':
+            fx = fx_map.get(d)
+            if fx:
+                price_map[d] = raw * fx
+        else:
+            price_map[d] = raw
+    return price_map, source
+
+
+@router.get(
+    "/portfolios/{portfolio_id}/holdings/{symbol}/history",
+    response_model=PriceHistoryResponse
+)
+def get_holding_price_history(
+    portfolio_id: UUID,
+    symbol: str,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    frequency: str = "daily",  # 'daily', 'weekly', 'monthly'
+    portfolio: Portfolio = Depends(get_portfolio),
+    db: Session = Depends(get_db_session)
+):
+    """
+    Get price/value history for a holding (JPY-converted when possible).
+
+    Args:
+        portfolio_id: Portfolio UUID
+        symbol: Holding symbol
+        start_date: Optional start date. If not provided, uses first transaction date.
+        end_date: Optional end date. If not provided, uses today.
+        frequency: Data frequency - 'daily' (default), 'weekly', or 'monthly'
+
+    Returns:
+        Price history with dates covering the actual transaction period
+    """
+    try:
+        holding = (
+            db.query(Holding)
+            .filter(Holding.portfolio_id == portfolio.id, Holding.symbol == symbol)
+            .first()
+        )
+        if not holding:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Holding {symbol} not found in portfolio {portfolio_id}"
+            )
+
+        transactions = (
+            db.query(Transaction)
+            .filter(Transaction.portfolio_id == portfolio.id, Transaction.symbol == symbol)
+            .order_by(Transaction.transaction_date)
+            .all()
+        )
+
+        # Always default to today for end_date
+        if not end_date:
+            end_date = date.today()
+
+        # Automatically use transaction period if start_date not provided
+        if not start_date:
+            # Prefer first_purchase_date from holding (pre-computed, faster)
+            if holding.first_purchase_date:
+                start_date = holding.first_purchase_date
+            # Fallback to first transaction
+            elif transactions:
+                start_date = transactions[0].transaction_date
+            # Last resort: use end_date (will result in single day)
+            else:
+                start_date = end_date
+
+        if start_date > end_date:
+            raise HTTPException(
+                status_code=400,
+                detail="start_date must be on or before end_date"
+            )
+
+        price_service = HistoricalPriceService(db)
+        prices, source = price_service.get_price_history(
+            symbol=symbol,
+            name=holding.name,
+            start_date=start_date,
+            end_date=end_date,
+            portfolio_id=str(portfolio.id)
+        )
+
+        if prices is None or prices.empty:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No price history available for {symbol}"
+            )
+
+        # Resample data based on frequency parameter
+        if frequency == "weekly":
+            # Resample to weekly (Friday close, or last available day of week)
+            prices = prices.resample('W-FRI').last().dropna()
+        elif frequency == "monthly":
+            # Resample to monthly (month-end close)
+            prices = prices.resample('M').last().dropna()
+
+        # FX conversion for USD assets
+        fx_rates = None
+        fx_map = {}
+        if holding.market == 'US':
+            fx_rates = price_service.get_exchange_rate_history(start_date, end_date)
+            if fx_rates is not None:
+                # Build initial FX map from DataFrame
+                raw_fx_map = {}
+                for idx, row in fx_rates.iterrows():
+                    d = idx.date() if hasattr(idx, "date") else idx
+                    raw_fx_map[d] = float(row["rate"])
+
+                # Forward-fill missing FX rates to avoid gaps
+                last_fx = None
+                current_date = start_date
+                while current_date <= end_date:
+                    if current_date in raw_fx_map:
+                        last_fx = raw_fx_map[current_date]
+                    if last_fx is not None:
+                        fx_map[current_date] = last_fx
+                    current_date += timedelta(days=1)
+
+        qty_map = _build_quantity_map(transactions, start_date, end_date)
+        currency = 'USD' if holding.market == 'US' else 'JPY'
+
+        points = []
+        for idx, row in prices.iterrows():
+            point_date = idx.date() if hasattr(idx, "date") else idx
+            price_raw = float(row['price'])
+            fx_rate = fx_map.get(point_date) if holding.market == 'US' else None
+            price_jpy = price_raw * fx_rate if fx_rate else (price_raw if holding.market != 'US' else None)
+            quantity = qty_map.get(point_date)
+            value_jpy = price_jpy * quantity if price_jpy is not None and quantity is not None else None
+
+            points.append({
+                "date": point_date,
+                "price_raw": price_raw,
+                "fx_rate": fx_rate,
+                "price_jpy": price_jpy,
+                "quantity": quantity,
+                "value_jpy": value_jpy
+            })
+
+        return PriceHistoryResponse(
+            source=source,
+            currency=currency,
+            points=points
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch holding history for {symbol}: {str(e)}"
+        )
+
+
+@router.get(
+    "/portfolios/{portfolio_id}/timeline",
+    response_model=PortfolioTimelineResponse
+)
+def get_portfolio_timeline(
+    portfolio_id: UUID,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    portfolio: Portfolio = Depends(get_portfolio),
+    db: Session = Depends(get_db_session)
+):
+    """
+    Daily cumulative invested value vs total evaluation value (JPY).
+    """
+    try:
+        holdings: List[Holding] = (
+            db.query(Holding).filter(Holding.portfolio_id == portfolio.id).all()
+        )
+        transactions: List[Transaction] = (
+            db.query(Transaction)
+            .filter(Transaction.portfolio_id == portfolio.id)
+            .order_by(Transaction.transaction_date)
+            .all()
+        )
+
+        if not end_date:
+            end_date = date.today()
+        if not start_date:
+            start_date = transactions[0].transaction_date if transactions else end_date
+        if start_date > end_date:
+            raise HTTPException(status_code=400, detail="start_date must be on or before end_date")
+
+        price_service = HistoricalPriceService(db)
+
+        # FX map (USD -> JPY) fetched once
+        fx_map: Dict[date, float] = {}
+        if any(h.market == 'US' for h in holdings):
+            fx_rates = price_service.get_exchange_rate_history(start_date, end_date)
+            if fx_rates is not None:
+                fx_map = {
+                    (idx.date() if hasattr(idx, "date") else idx): float(row['rate'])
+                    for idx, row in fx_rates.iterrows()
+                }
+
+        # Precompute per-holding quantity maps and price maps
+        qty_maps: Dict[str, Dict[date, float]] = {}
+        price_maps: Dict[str, Dict[date, float]] = {}
+        for h in holdings:
+            h_txs = [tx for tx in transactions if tx.symbol == h.symbol]
+            qty_maps[h.symbol] = _build_quantity_map(h_txs, start_date, end_date)
+            price_map, _ = _build_price_map(price_service, h, start_date, end_date, fx_map, h_txs)
+            price_maps[h.symbol] = price_map
+
+        # Invested cumulative per day
+        invested_by_date = defaultdict(float)
+        for tx in transactions:
+            if tx.side == 'BUY':
+                invested_by_date[tx.transaction_date] += float(tx.amount_jpy)
+
+        points: List[PortfolioTimelinePoint] = []
+        running_invested = 0.0
+        current_date = start_date
+        while current_date <= end_date:
+            running_invested += invested_by_date.get(current_date, 0.0)
+
+            total_value = 0.0
+            for h in holdings:
+                qty = qty_maps.get(h.symbol, {}).get(current_date, 0.0)
+                if qty <= 0:
+                    continue
+                price_jpy = price_maps.get(h.symbol, {}).get(current_date)
+                if price_jpy is None:
+                    continue
+                total_value += qty * price_jpy
+
+            points.append(
+                PortfolioTimelinePoint(
+                    date=current_date,
+                    invested_cumulative_jpy=running_invested,
+                    total_value_jpy=total_value
+                )
+            )
+            current_date += timedelta(days=1)
+
+        return PortfolioTimelineResponse(points=points)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate portfolio timeline: {str(e)}"
+        )

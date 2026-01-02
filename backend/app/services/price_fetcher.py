@@ -3,24 +3,27 @@ Historical Price Fetcher
 
 Multi-tier approach:
 1. Yahoo Finance (direct tickers)
-2. Proxy indices (mutual funds)
+2. Official NAV (for mutual funds)
 3. Linear interpolation (fallback)
 """
 
 import time
+import random
 from datetime import datetime, date, timedelta
 from typing import List, Optional, Dict, Tuple
 from functools import wraps
+from threading import Lock, Event
 import pandas as pd
 import yfinance as yf
 from sqlalchemy.orm import Session
 
-from app.services.ticker_mappings import (
-    get_yahoo_ticker,
-    get_proxy_info,
-    PROXY_ALTERNATIVES
-)
+from app.services.ticker_mappings import get_yahoo_ticker
 from app.db.models.transaction import Transaction
+from app.services.alt_price_fetcher import SecondaryPriceFetcher
+from app.services.nav_fetcher import ToshinNavFetcher
+from app.services.yahoo_scraper_enhanced import YahooScraperFetcher
+from app.services.alias_resolver import resolve_alias
+from app.services.price_cache_service import PriceCacheService
 
 
 # Rate limiting decorator
@@ -93,104 +96,6 @@ class YahooFinanceFetcher:
             return None
 
 
-class ProxyIndexEstimator:
-    """Tier 2: Estimate mutual fund prices using proxy indices"""
-
-    def __init__(self, yahoo_fetcher: YahooFinanceFetcher):
-        self.yahoo_fetcher = yahoo_fetcher
-
-    def estimate(
-        self,
-        fund_name: str,
-        start_date: date,
-        end_date: date,
-        reference_price: float,
-        reference_date: date
-    ) -> Optional[pd.DataFrame]:
-        """
-        Estimate mutual fund NAV using proxy index
-
-        Args:
-            fund_name: Full fund name
-            start_date: Start date for estimation
-            end_date: End date for estimation
-            reference_price: Known NAV at reference date
-            reference_date: Date of known NAV
-
-        Returns:
-            DataFrame with Date index and estimated prices
-        """
-        proxy_info = get_proxy_info(fund_name)
-
-        if not proxy_info:
-            print(f"⚠️ No proxy mapping for fund: {fund_name}")
-            return None
-
-        proxy_ticker = proxy_info['proxy']
-        print(f"📊 Using proxy {proxy_ticker} for {fund_name[:30]}...")
-
-        # Fetch proxy index prices
-        # Need to include reference date
-        fetch_start = min(start_date, reference_date)
-        fetch_end = max(end_date, reference_date)
-
-        proxy_prices = self.yahoo_fetcher.fetch(proxy_ticker, fetch_start, fetch_end)
-
-        if proxy_prices is None:
-            # Try alternative proxy
-            if proxy_ticker in PROXY_ALTERNATIVES:
-                alt_ticker = PROXY_ALTERNATIVES[proxy_ticker]
-                print(f"🔄 Trying alternative proxy: {alt_ticker}")
-                proxy_prices = self.yahoo_fetcher.fetch(alt_ticker, fetch_start, fetch_end)
-
-            if proxy_prices is None:
-                return None
-
-        # Get proxy price at reference date
-        try:
-            ref_proxy_price = proxy_prices.loc[proxy_prices.index.date == reference_date, 'price'].iloc[0]
-        except (IndexError, KeyError):
-            # If exact date not found, use nearest
-            nearest_idx = proxy_prices.index.get_indexer([pd.Timestamp(reference_date)], method='nearest')[0]
-            ref_proxy_price = proxy_prices.iloc[nearest_idx]['price']
-
-        # Calculate estimated NAVs
-        estimated_prices = []
-
-        for idx, row in proxy_prices.iterrows():
-            price_date = idx.date()
-
-            if price_date < start_date or price_date > end_date:
-                continue
-
-            # Calculate return ratio
-            return_ratio = row['price'] / ref_proxy_price
-
-            # Apply to reference NAV
-            estimated_nav = reference_price * return_ratio
-
-            # Adjust for expense ratio (annual fee)
-            days_diff = (price_date - reference_date).days
-            years_diff = days_diff / 365.25
-            expense_adjustment = (1 - proxy_info['expense_ratio'] / 100) ** years_diff
-
-            estimated_nav *= expense_adjustment
-
-            estimated_prices.append({
-                'date': price_date,
-                'price': estimated_nav
-            })
-
-        if not estimated_prices:
-            return None
-
-        result = pd.DataFrame(estimated_prices)
-        result.set_index('date', inplace=True)
-
-        print(f"✅ Estimated {len(result)} prices for {fund_name[:30]}...")
-        return result
-
-
 class LinearInterpolator:
     """Tier 3: Linear interpolation between transaction prices"""
 
@@ -259,8 +164,9 @@ class LinearInterpolator:
 class ExchangeRateService:
     """Fetch USD/JPY exchange rates"""
 
-    def __init__(self, yahoo_fetcher: YahooFinanceFetcher):
+    def __init__(self, yahoo_fetcher: YahooFinanceFetcher, alt_fetcher: Optional[SecondaryPriceFetcher] = None):
         self.yahoo_fetcher = yahoo_fetcher
+        self.alt_fetcher = alt_fetcher
 
     def get_rates(
         self,
@@ -280,8 +186,14 @@ class ExchangeRateService:
         rates = self.yahoo_fetcher.fetch("USDJPY=X", start_date, end_date)
 
         if rates is None:
+            # Try alternative provider tickers
+            if self.alt_fetcher:
+                for fx_ticker in ["USD/JPY", "USDJPY"]:
+                    alt = self.alt_fetcher.fetch(fx_ticker, start_date, end_date)
+                    if alt is not None:
+                        alt.columns = ["rate"]
+                        return alt
             print("⚠️ Failed to fetch USD/JPY rates, using fallback")
-            # Fallback: Use current rate from config or hardcoded
             return None
 
         rates.columns = ['rate']
@@ -294,16 +206,59 @@ class HistoricalPriceService:
 
     Uses multi-tier approach:
     1. Yahoo Finance (direct)
-    2. Proxy indices (mutual funds)
+    2. Official NAV (for mutual funds)
     3. Linear interpolation (fallback)
     """
 
     def __init__(self, db: Session):
         self.db = db
         self.yahoo_fetcher = YahooFinanceFetcher()
-        self.proxy_estimator = ProxyIndexEstimator(self.yahoo_fetcher)
+        self.alt_fetcher = SecondaryPriceFetcher()
         self.interpolator = LinearInterpolator()
-        self.fx_service = ExchangeRateService(self.yahoo_fetcher)
+        self.fx_service = ExchangeRateService(self.yahoo_fetcher, self.alt_fetcher)
+        self.nav_fetcher = ToshinNavFetcher()
+        self.scraper = YahooScraperFetcher()
+        self.cache_service = PriceCacheService(db)  # NEW: Database cache
+        self._cache = {}  # simple in-process cache keyed by (symbol, start, end)
+        self._inflight: Dict[Tuple[str, date, date], Event] = {}
+        self._inflight_lock = Lock()
+        self._failures: Dict[Tuple[str, str], Tuple[int, float]] = {}  # (symbol, source) -> (count, last_ts)
+
+    def _with_retry(self, func, max_attempts: int = 2, base_delay: float = 0.5):
+        """Simple retry with jitter to avoid hammering sources."""
+        attempt = 0
+        while attempt < max_attempts:
+            try:
+                return func()
+            except Exception:
+                attempt += 1
+                if attempt >= max_attempts:
+                    raise
+                sleep_for = base_delay * (2 ** (attempt - 1)) + random.random() * 0.2
+                time.sleep(sleep_for)
+
+    def _get_tx_bounds(self, symbol: str, portfolio_id: str) -> Tuple[Optional[date], Optional[date]]:
+        """Find first/last transaction dates for clamping fetch windows."""
+        tx = (
+            self.db.query(Transaction.transaction_date)
+            .filter(Transaction.portfolio_id == portfolio_id, Transaction.symbol == symbol)
+            .order_by(Transaction.transaction_date)
+            .all()
+        )
+        if not tx:
+            return None, None
+        def _extract(obj):
+            # Support ORM tuples or SimpleNamespace in tests
+            if hasattr(obj, "transaction_date"):
+                return getattr(obj, "transaction_date")
+            try:
+                return obj[0]
+            except Exception:
+                return None
+
+        first = _extract(tx[0])
+        last = _extract(tx[-1])
+        return first, last
 
     def get_price_history(
         self,
@@ -325,53 +280,157 @@ class HistoricalPriceService:
 
         Returns:
             Tuple of (DataFrame with prices, source_type)
-            source_type: 'yahoo', 'proxy', 'interpolated', or 'none'
+            source_type: 'scraped', 'yahoo', 'alt', 'nav', 'interpolated', or 'none'
         """
-        # Tier 1: Try Yahoo Finance (direct)
-        yahoo_ticker = get_yahoo_ticker(symbol)
+        # Resolve aliases (e.g., オルカン fund code/name -> canonical fetch symbol)
+        fetch_symbol, fetch_name = resolve_alias(symbol, name)
 
-        if yahoo_ticker:
-            print(f"🔍 Tier 1: Yahoo Finance for {symbol}")
-            prices = self.yahoo_fetcher.fetch(yahoo_ticker, start_date, end_date)
+        # Clamp date range to transaction window to avoid unnecessary fetch
+        tx_first, tx_last = self._get_tx_bounds(symbol, portfolio_id)
+        effective_start = max(start_date, tx_first) if tx_first else start_date
+        effective_end = end_date if not tx_last else max(end_date, tx_last)
+
+        cache_key = (fetch_symbol, effective_start, effective_end)
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+
+        # Deduplicate concurrent in-process fetches for the same window
+        with self._inflight_lock:
+            if cache_key in self._inflight:
+                evt = self._inflight[cache_key]
+                created = False
+            else:
+                evt = Event()
+                self._inflight[cache_key] = evt
+                created = True
+        if not created:
+            # Another thread is fetching; wait briefly for result to land in cache
+            evt.wait(timeout=5)
+            return self._cache.get(cache_key, (None, 'none'))
+        if evt.is_set():
+            # Another thread already finished while we were here
+            return self._cache.get(cache_key, (None, 'none'))
+
+        # Circuit breaker: skip network-heavy sources on repeated recent failures
+        def _is_open(src: str) -> bool:
+            count, last_ts = self._failures.get((fetch_symbol, src), (0, 0.0))
+            cooldown = 60  # seconds
+            return count >= 3 and (time.time() - last_ts) < cooldown
+
+        # NEW: Check database cache first (try all data sources in priority order)
+        # If no mapping found and symbol looks JP numeric, default to .T
+        yahoo_ticker = get_yahoo_ticker(fetch_symbol)
+        if not yahoo_ticker:
+            if fetch_symbol.endswith(".T"):
+                yahoo_ticker = fetch_symbol
+            elif fetch_symbol.isdigit():
+                yahoo_ticker = f"{fetch_symbol}.T"
+            else:
+                yahoo_ticker = fetch_symbol
+
+        # Try data sources in order of preference: scraped > nav > yahoo > alt > interpolated
+        for source_type in ['scraped', 'nav', 'yahoo', 'alt', 'interpolated']:
+            cached_data, cache_source = self.cache_service.get_price_history(
+                symbol=fetch_symbol,
+                ticker=yahoo_ticker,
+                start_date=effective_start,
+                end_date=effective_end,
+                source=source_type
+            )
+            if cached_data is not None and cache_source == 'cache':
+                print(f"✅ Cache hit: {len(cached_data)} rows from '{source_type}' source")
+                self._cache[cache_key] = (cached_data, source_type)
+                evt.set()
+                with self._inflight_lock:
+                    self._inflight.pop(cache_key, None)
+                return cached_data, source_type
+
+        # Tier 0: Official NAV cache
+        nav_prices = None
+        if not _is_open('nav'):
+            try:
+                nav_prices = self._with_retry(
+                    lambda: self.nav_fetcher.fetch(fetch_name, effective_start, effective_end)
+                )
+            except Exception:
+                self._failures[(fetch_symbol, 'nav')] = (self._failures.get((fetch_symbol, 'nav'), (0, 0.0))[0] + 1, time.time())
+        if nav_prices is not None:
+            print(f"📊 Using official NAV for {fetch_name[:30]}...")
+            self._cache[cache_key] = (nav_prices, 'nav')
+            # Store NAV data in cache
+            self.cache_service._store_price_data(fetch_symbol, yahoo_ticker, nav_prices, 'nav')
+            return nav_prices, 'nav'
+
+        # Tier 1: Scrape Yahoo Finance (JP/Global)
+        scraped = None
+        if not _is_open('scraped'):
+            print(f"🔍 Tier 1: Yahoo scrape for {fetch_symbol} ({yahoo_ticker})")
+            try:
+                scraped = self._with_retry(
+                    lambda: self.scraper.fetch(yahoo_ticker, effective_start, effective_end)
+                )
+                if scraped is None:
+                    print(f"⚠️  Scraper returned None for {yahoo_ticker}")
+            except Exception as e:
+                print(f"❌ Scraper error for {yahoo_ticker}: {e}")
+                self._failures[(fetch_symbol, 'scraped')] = (self._failures.get((fetch_symbol, 'scraped'), (0, 0.0))[0] + 1, time.time())
+        if scraped is not None:
+            self._cache[cache_key] = (scraped, 'scraped')
+            # Store scraped data in cache
+            self.cache_service._store_price_data(fetch_symbol, yahoo_ticker, scraped, 'scraped')
+            evt.set()
+            with self._inflight_lock:
+                self._inflight.pop(cache_key, None)
+            return scraped, 'scraped'
+
+        # Tier 2: Yahoo Finance API (yfinance)
+        # Skip yfinance for Japanese stocks (doesn't support .T suffix well)
+        yf_ticker = get_yahoo_ticker(fetch_symbol)
+        yf_ticker = yahoo_ticker
+        if yf_ticker and yf_ticker.endswith('.T'):
+            print(f"⏭️  Skipping yfinance for Japanese ticker {yf_ticker} (not supported)")
+        elif yf_ticker and not _is_open('yahoo'):
+            print(f"🔍 Tier 2: Yahoo Finance API for {fetch_symbol}")
+            try:
+                prices = self._with_retry(
+                    lambda: self.yahoo_fetcher.fetch(yf_ticker, effective_start, effective_end)
+                )
+            except Exception:
+                prices = None
+                self._failures[(fetch_symbol, 'yahoo')] = (self._failures.get((fetch_symbol, 'yahoo'), (0, 0.0))[0] + 1, time.time())
             if prices is not None:
+                self._cache[cache_key] = (prices, 'yahoo')
+                # Store yfinance data in cache
+                self.cache_service._store_price_data(fetch_symbol, yf_ticker, prices, 'yahoo')
+                evt.set()
+                with self._inflight_lock:
+                    self._inflight.pop(cache_key, None)
                 return prices, 'yahoo'
 
-        # Tier 2: Try Proxy Index (for mutual funds)
-        proxy_info = get_proxy_info(name)
-
-        if proxy_info:
-            print(f"🔍 Tier 2: Proxy estimation for {name[:30]}")
-
-            # Get a reference transaction to establish baseline
-            transactions = (
-                self.db.query(Transaction)
-                .filter(
-                    Transaction.portfolio_id == portfolio_id,
-                    Transaction.symbol == symbol
+        # Tier 3: Alternative provider (Twelve Data / Alpha Vantage)
+        # Skip alt providers for Japanese stocks (don't support .T suffix)
+        if yf_ticker and yf_ticker.endswith('.T'):
+            print(f"⏭️  Skipping alt provider for Japanese ticker {yf_ticker} (not supported)")
+        elif yf_ticker and not _is_open('alt'):
+            print(f"🔍 Tier 3: Alternative provider for {fetch_symbol}")
+            try:
+                alt_prices = self._with_retry(
+                    lambda: self.alt_fetcher.fetch(yf_ticker, effective_start, effective_end)
                 )
-                .order_by(Transaction.transaction_date)
-                .all()
-            )
+            except Exception:
+                alt_prices = None
+                self._failures[(fetch_symbol, 'alt')] = (self._failures.get((fetch_symbol, 'alt'), (0, 0.0))[0] + 1, time.time())
+            if alt_prices is not None:
+                self._cache[cache_key] = (alt_prices, 'alt')
+                # Store alternative provider data in cache
+                self.cache_service._store_price_data(fetch_symbol, yf_ticker, alt_prices, 'alt')
+                evt.set()
+                with self._inflight_lock:
+                    self._inflight.pop(cache_key, None)
+                return alt_prices, 'alt'
 
-            if transactions:
-                # Use first transaction as reference
-                ref_tx = transactions[0]
-                ref_price = ref_tx.amount_jpy / ref_tx.quantity if ref_tx.quantity > 0 else 0
-                ref_date = ref_tx.transaction_date
-
-                prices = self.proxy_estimator.estimate(
-                    name,
-                    start_date,
-                    end_date,
-                    ref_price,
-                    ref_date
-                )
-
-                if prices is not None:
-                    return prices, 'proxy'
-
-        # Tier 3: Fallback to Linear Interpolation
-        print(f"🔍 Tier 3: Interpolation for {symbol}")
+        # Tier 4: Fallback to Linear Interpolation
+        print(f"🔍 Tier 4: Interpolation for {symbol}")
 
         transactions = (
             self.db.query(Transaction)
@@ -383,13 +442,22 @@ class HistoricalPriceService:
             .all()
         )
 
-        prices = self.interpolator.interpolate(transactions, start_date, end_date)
+        prices = self.interpolator.interpolate(transactions, effective_start, effective_end)
 
         if prices is not None:
+            self._cache[cache_key] = (prices, 'interpolated')
+            # Store interpolated data in cache for future use
+            self.cache_service._store_price_data(fetch_symbol, yahoo_ticker, prices, 'interpolated')
+            evt.set()
+            with self._inflight_lock:
+                self._inflight.pop(cache_key, None)
             return prices, 'interpolated'
 
         # All tiers failed
         print(f"❌ All tiers failed for {symbol}")
+        evt.set()
+        with self._inflight_lock:
+            self._inflight.pop(cache_key, None)
         return None, 'none'
 
     def get_exchange_rate_history(

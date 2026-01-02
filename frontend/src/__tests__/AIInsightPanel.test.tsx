@@ -7,7 +7,9 @@ import { portfolioAPI } from '../services/api';
 vi.mock('../services/api', () => ({
   portfolioAPI: {
     generateInsights: vi.fn().mockResolvedValue({
-      insights: '## Test Insight\n- Point A\n- Point B',
+      status: 'success',
+      report: '## Test Insight\n- Point A\n- Point B',
+      generated_at: '2024-01-01T00:00:00Z',
     }),
   },
 }));

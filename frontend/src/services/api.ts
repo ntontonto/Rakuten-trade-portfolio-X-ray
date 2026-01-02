@@ -7,6 +7,9 @@ import type {
   Holding,
   PortfolioMetrics,
   UploadResponse,
+  PriceHistoryResponse,
+  PortfolioTimelineResponse,
+  AIInsightResponse,
 } from '../types';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api/v1';
@@ -67,9 +70,41 @@ export const portfolioAPI = {
     return response.data;
   },
 
+  // Get price/value history for a holding
+  // If start_date/end_date not provided, backend automatically uses transaction period
+  getHoldingHistory: async (
+    portfolioId: string,
+    symbol: string,
+    params?: {
+      start_date?: string;
+      end_date?: string;
+      frequency?: 'daily' | 'weekly' | 'monthly';
+    }
+  ): Promise<PriceHistoryResponse> => {
+    const response = await api.get<PriceHistoryResponse>(
+      `/portfolios/${portfolioId}/holdings/${symbol}/history`,
+      { params }
+    );
+    return response.data;
+  },
+
   // Generate AI insights
-  generateInsights: async (portfolioId: string): Promise<{ insights: string }> => {
-    const response = await api.post('/ai/insights', { portfolio_id: portfolioId });
+  generateInsights: async (portfolioId: string): Promise<AIInsightResponse> => {
+    const response = await api.post<AIInsightResponse>('/ai/insights', {
+      portfolio_id: portfolioId,
+    });
+    return response.data;
+  },
+
+  // Portfolio timeline: cumulative invested vs total value
+  getPortfolioTimeline: async (
+    portfolioId: string,
+    params?: { start_date?: string; end_date?: string }
+  ): Promise<PortfolioTimelineResponse> => {
+    const response = await api.get<PortfolioTimelineResponse>(
+      `/portfolios/${portfolioId}/timeline`,
+      { params }
+    );
     return response.data;
   },
 };
