@@ -8,9 +8,17 @@ import {
   YAxis,
   CartesianGrid,
   Legend,
+  LineChart,
+  Line,
 } from 'recharts';
 import { portfolioAPI } from '../../services/api';
-import type { Holding, PriceHistoryPoint, PriceHistoryResponse } from '../../types';
+import type {
+  Holding,
+  PriceHistoryPoint,
+  PriceHistoryResponse,
+  InvestmentTimelinePoint,
+  InvestmentTimelineResponse,
+} from '../../types';
 
 interface AssetDetailProps {
   holding: Holding;
@@ -32,6 +40,7 @@ export default function AssetDetail({ holding, portfolioId, onClose }: AssetDeta
   const [range, setRange] = useState<RangeKey>('MAX'); // Default to transaction period
   const [frequency, setFrequency] = useState<FrequencyKey>('daily');
   const [history, setHistory] = useState<PriceHistoryResponse | null>(null);
+  const [timeline, setTimeline] = useState<InvestmentTimelineResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -54,8 +63,12 @@ export default function AssetDetail({ holding, portfolioId, onClose }: AssetDeta
         }
         // else: MAX range - backend will use first_purchase_date to today
 
-        const response = await portfolioAPI.getHoldingHistory(portfolioId, holding.symbol, params);
-        setHistory(response);
+        const [historyRes, timelineRes] = await Promise.all([
+          portfolioAPI.getHoldingHistory(portfolioId, holding.symbol, params),
+          portfolioAPI.getInvestmentTimeline(portfolioId, holding.symbol, params),
+        ]);
+        setHistory(historyRes);
+        setTimeline(timelineRes);
       } catch (e: any) {
         setError(e.response?.data?.detail || e.message || 'Failed to load history');
       } finally {
@@ -82,6 +95,15 @@ export default function AssetDetail({ holding, portfolioId, onClose }: AssetDeta
       date: last.date,
     };
   }, [history]);
+
+  const timelineData = useMemo(() => {
+    if (!timeline) return [];
+    return timeline.points.map((p: InvestmentTimelinePoint) => ({
+      date: p.date,
+      invested: p.invested_cumulative_jpy,
+      value: p.value_jpy,
+    }));
+  }, [timeline]);
 
   return (
     <div className="fixed inset-0 bg-black/30 flex items-end sm:items-center justify-center z-50">
@@ -192,6 +214,40 @@ export default function AssetDetail({ holding, portfolioId, onClose }: AssetDeta
                   </AreaChart>
                 </ResponsiveContainer>
               </div>
+
+              {timelineData.length > 0 && (
+                <div className="h-72">
+                  <ResponsiveContainer>
+                    <LineChart data={timelineData} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                      <XAxis dataKey="date" tick={{ fontSize: 12 }} />
+                      <YAxis tick={{ fontSize: 12 }} />
+                      <Tooltip
+                        formatter={(value: number) =>
+                          `¥${value.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+                        }
+                      />
+                      <Legend />
+                      <Line
+                        type="monotone"
+                        dataKey="invested"
+                        stroke="#0ea5e9"
+                        dot={false}
+                        name="累計投資額"
+                        strokeWidth={2}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="value"
+                        stroke="#22c55e"
+                        dot={false}
+                        name="評価額"
+                        strokeWidth={2}
+                      />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
             </div>
           )}
         </div>

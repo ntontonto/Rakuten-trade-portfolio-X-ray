@@ -16,7 +16,8 @@ from app.schemas.analysis import (
     ChartData,
     PriceHistoryResponse,
     PortfolioTimelineResponse,
-    PortfolioTimelinePoint
+    PortfolioTimelinePoint,
+    InvestmentTimelineResponse
 )
 from app.services.xirr_calculator import CashFlow, calculate_xirr, format_xirr
 from app.services.asset_classifier import get_asset_class_color, get_strategy_color
@@ -689,4 +690,118 @@ def get_portfolio_timeline(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to generate portfolio timeline: {str(e)}"
+        )
+
+
+@router.get(
+    "/portfolios/{portfolio_id}/holdings/{symbol}/investment-timeline",
+    response_model=InvestmentTimelineResponse
+)
+def get_investment_timeline(
+    portfolio_id: UUID,
+    symbol: str,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    portfolio: Portfolio = Depends(get_portfolio),
+    db: Session = Depends(get_db_session)
+):
+    """
+    Daily cumulative invested vs current valuation for a holding.
+    """
+    try:
+        holding = (
+            db.query(Holding)
+            .filter(Holding.portfolio_id == portfolio.id, Holding.symbol == symbol)
+            .first()
+        )
+        if not holding:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Holding {symbol} not found in portfolio {portfolio_id}"
+            )
+
+        transactions = (
+            db.query(Transaction)
+            .filter(Transaction.portfolio_id == portfolio.id, Transaction.symbol == symbol)
+            .order_by(Transaction.transaction_date)
+            .all()
+        )
+
+        if not end_date:
+            end_date = date.today()
+        if not start_date:
+            if holding.first_purchase_date:
+                start_date = holding.first_purchase_date
+            elif transactions:
+                start_date = transactions[0].transaction_date
+            else:
+                start_date = end_date
+
+        if start_date > end_date:
+            raise HTTPException(
+                status_code=400,
+                detail="start_date must be on or before end_date"
+            )
+
+        price_service = HistoricalPriceService(db)
+
+        # FX map (USD -> JPY) fetched once
+        fx_map: Dict[date, float] = {}
+        if holding.market == 'US':
+            fx_rates = price_service.get_exchange_rate_history(start_date, end_date)
+            if fx_rates is not None:
+                raw_fx = {
+                    (idx.date() if hasattr(idx, "date") else idx): float(row['rate'])
+                    for idx, row in fx_rates.iterrows()
+                }
+                # forward fill
+                last_fx = None
+                current_date = start_date
+                while current_date <= end_date:
+                    if current_date in raw_fx:
+                        last_fx = raw_fx[current_date]
+                    if last_fx is not None:
+                        fx_map[current_date] = last_fx
+                    current_date += timedelta(days=1)
+
+        qty_map = _build_quantity_map(transactions, start_date, end_date)
+        price_map, _ = _build_price_map(price_service, holding, start_date, end_date, fx_map, transactions)
+
+        # Cumulative invested (BUY adds, SELL subtracts)
+        invested_by_date = defaultdict(float)
+        for tx in transactions:
+            if tx.side == 'BUY':
+                invested_by_date[tx.transaction_date] += float(tx.amount_jpy)
+            elif tx.side == 'SELL':
+                invested_by_date[tx.transaction_date] -= float(tx.amount_jpy)
+
+        points: List[InvestmentTimelineResponse] = []
+        running_invested = 0.0
+        current_date = start_date
+        while current_date <= end_date:
+            running_invested += invested_by_date.get(current_date, 0.0)
+
+            qty = qty_map.get(current_date, 0.0)
+            price_jpy = price_map.get(current_date)
+            value_jpy = qty * price_jpy if (price_jpy is not None and qty is not None) else 0.0
+
+            points.append(
+                {
+                    "date": current_date,
+                    "invested_cumulative_jpy": running_invested,
+                    "value_jpy": value_jpy
+                }
+            )
+            current_date += timedelta(days=1)
+
+        return InvestmentTimelineResponse(points=points)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate investment timeline for {symbol}: {str(e)}"
         )

@@ -115,6 +115,16 @@ export interface PriceHistoryResponse {
   points: PriceHistoryPoint[];
 }
 
+export interface InvestmentTimelinePoint {
+  date: string;
+  invested_cumulative_jpy: number;
+  value_jpy: number;
+}
+
+export interface InvestmentTimelineResponse {
+  points: InvestmentTimelinePoint[];
+}
+
 export interface PortfolioTimelinePoint {
   date: string;
   invested_cumulative_jpy: number;
