@@ -328,8 +328,8 @@ class HistoricalPriceService:
             else:
                 yahoo_ticker = fetch_symbol
 
-        # Try data sources in order of preference: scraped > nav > yahoo > alt > interpolated
-        for source_type in ['scraped', 'nav', 'yahoo', 'alt', 'interpolated']:
+        # Try cache in order of preference: yahoo/alt caches are cheap and avoid scraping first
+        for source_type in ['yahoo', 'alt', 'scraped', 'nav', 'interpolated']:
             cached_data, cache_source = self.cache_service.get_price_history(
                 symbol=fetch_symbol,
                 ticker=yahoo_ticker,
@@ -361,10 +361,49 @@ class HistoricalPriceService:
             self.cache_service._store_price_data(fetch_symbol, yahoo_ticker, nav_prices, 'nav')
             return nav_prices, 'nav'
 
-        # Tier 1: Scrape Yahoo Finance (JP/Global)
+        # Tier 1: Yahoo Finance API (yfinance)
+        yf_ticker = yahoo_ticker
+        if yf_ticker and not _is_open('yahoo'):
+            print(f"🔍 Tier 1: Yahoo Finance API for {fetch_symbol}")
+            try:
+                prices = self._with_retry(
+                    lambda: self.yahoo_fetcher.fetch(yf_ticker, effective_start, effective_end)
+                )
+            except Exception:
+                prices = None
+                self._failures[(fetch_symbol, 'yahoo')] = (self._failures.get((fetch_symbol, 'yahoo'), (0, 0.0))[0] + 1, time.time())
+            if prices is not None:
+                self._cache[cache_key] = (prices, 'yahoo')
+                # Store yfinance data in cache
+                self.cache_service._store_price_data(fetch_symbol, yf_ticker, prices, 'yahoo')
+                evt.set()
+                with self._inflight_lock:
+                    self._inflight.pop(cache_key, None)
+                return prices, 'yahoo'
+
+        # Tier 2: Alternative provider (Twelve Data / Alpha Vantage)
+        if yf_ticker and not _is_open('alt'):
+            print(f"🔍 Tier 2: Alternative provider for {fetch_symbol}")
+            try:
+                alt_prices = self._with_retry(
+                    lambda: self.alt_fetcher.fetch(yf_ticker, effective_start, effective_end)
+                )
+            except Exception:
+                alt_prices = None
+                self._failures[(fetch_symbol, 'alt')] = (self._failures.get((fetch_symbol, 'alt'), (0, 0.0))[0] + 1, time.time())
+            if alt_prices is not None:
+                self._cache[cache_key] = (alt_prices, 'alt')
+                # Store alternative provider data in cache
+                self.cache_service._store_price_data(fetch_symbol, yf_ticker, alt_prices, 'alt')
+                evt.set()
+                with self._inflight_lock:
+                    self._inflight.pop(cache_key, None)
+                return alt_prices, 'alt'
+
+        # Tier 3: Scrape Yahoo Finance (JP/Global)
         scraped = None
         if not _is_open('scraped'):
-            print(f"🔍 Tier 1: Yahoo scrape for {fetch_symbol} ({yahoo_ticker})")
+            print(f"🔍 Tier 3: Yahoo scrape for {fetch_symbol} ({yahoo_ticker})")
             try:
                 scraped = self._with_retry(
                     lambda: self.scraper.fetch(yahoo_ticker, effective_start, effective_end)
@@ -382,52 +421,6 @@ class HistoricalPriceService:
             with self._inflight_lock:
                 self._inflight.pop(cache_key, None)
             return scraped, 'scraped'
-
-        # Tier 2: Yahoo Finance API (yfinance)
-        # Skip yfinance for Japanese stocks (doesn't support .T suffix well)
-        yf_ticker = get_yahoo_ticker(fetch_symbol)
-        yf_ticker = yahoo_ticker
-        if yf_ticker and yf_ticker.endswith('.T'):
-            print(f"⏭️  Skipping yfinance for Japanese ticker {yf_ticker} (not supported)")
-        elif yf_ticker and not _is_open('yahoo'):
-            print(f"🔍 Tier 2: Yahoo Finance API for {fetch_symbol}")
-            try:
-                prices = self._with_retry(
-                    lambda: self.yahoo_fetcher.fetch(yf_ticker, effective_start, effective_end)
-                )
-            except Exception:
-                prices = None
-                self._failures[(fetch_symbol, 'yahoo')] = (self._failures.get((fetch_symbol, 'yahoo'), (0, 0.0))[0] + 1, time.time())
-            if prices is not None:
-                self._cache[cache_key] = (prices, 'yahoo')
-                # Store yfinance data in cache
-                self.cache_service._store_price_data(fetch_symbol, yf_ticker, prices, 'yahoo')
-                evt.set()
-                with self._inflight_lock:
-                    self._inflight.pop(cache_key, None)
-                return prices, 'yahoo'
-
-        # Tier 3: Alternative provider (Twelve Data / Alpha Vantage)
-        # Skip alt providers for Japanese stocks (don't support .T suffix)
-        if yf_ticker and yf_ticker.endswith('.T'):
-            print(f"⏭️  Skipping alt provider for Japanese ticker {yf_ticker} (not supported)")
-        elif yf_ticker and not _is_open('alt'):
-            print(f"🔍 Tier 3: Alternative provider for {fetch_symbol}")
-            try:
-                alt_prices = self._with_retry(
-                    lambda: self.alt_fetcher.fetch(yf_ticker, effective_start, effective_end)
-                )
-            except Exception:
-                alt_prices = None
-                self._failures[(fetch_symbol, 'alt')] = (self._failures.get((fetch_symbol, 'alt'), (0, 0.0))[0] + 1, time.time())
-            if alt_prices is not None:
-                self._cache[cache_key] = (alt_prices, 'alt')
-                # Store alternative provider data in cache
-                self.cache_service._store_price_data(fetch_symbol, yf_ticker, alt_prices, 'alt')
-                evt.set()
-                with self._inflight_lock:
-                    self._inflight.pop(cache_key, None)
-                return alt_prices, 'alt'
 
         # Tier 4: Fallback to Linear Interpolation
         print(f"🔍 Tier 4: Interpolation for {symbol}")
