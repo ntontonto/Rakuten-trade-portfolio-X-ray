@@ -124,3 +124,28 @@ def test_tier2_interpolates_when_no_sources(monkeypatch):
     assert pytest.approx(values[0], rel=1e-6) == 100
     assert pytest.approx(values[1], rel=1e-6) == 150
     assert pytest.approx(values[2], rel=1e-6) == 200
+
+
+def test_jp_numeric_defaults_to_t_suffix(monkeypatch, sample_dates):
+    start_date, end_date = sample_dates
+
+    # Disable explicit mappings
+    monkeypatch.setattr("app.services.price_fetcher.get_yahoo_ticker", lambda symbol: None)
+
+    yahoo_df = pd.DataFrame({"price": [100, 101]}, index=pd.date_range(start_date, periods=2, freq="D"))
+
+    service = HistoricalPriceService(db=FakeSession([]))
+    stub_fetcher = StubFetcher({"1693.T": yahoo_df})
+    service.yahoo_fetcher = stub_fetcher
+
+    prices, source = service.get_price_history(
+        symbol="1693",
+        name="ＷＴ銅上場投信",
+        start_date=start_date,
+        end_date=end_date,
+        portfolio_id="p1",
+    )
+
+    assert source == "yahoo"
+    assert prices is not None
+    assert stub_fetcher.calls[0][0] == "1693.T"

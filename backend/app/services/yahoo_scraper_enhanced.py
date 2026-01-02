@@ -69,23 +69,27 @@ class YahooScraperFetcher:
             frequency: "daily" or "weekly"
             
         Rules:
-        - .T suffix → Yahoo Finance Japan (remove .T)
-        - Pure digits → Yahoo Finance Japan
+        - .T suffix → Yahoo Finance Japan (keep .T)
+        - Pure digits → Yahoo Finance Japan (append .T)
         - Starts with digits + letter (e.g., 0331418A) → Yahoo Finance Japan
         - Otherwise → Yahoo Finance Global
         """
         # Determine base URL
         base_url = None
-        
-        if ticker.endswith(".T"):
-            code = ticker.replace(".T", "")
-            base_url = f"https://finance.yahoo.co.jp/quote/{code}/history"
-        elif ticker.isdigit():
-            base_url = f"https://finance.yahoo.co.jp/quote/{ticker}/history"
-        elif len(ticker) > 1 and ticker[:-1].isdigit() and ticker[-1].isalpha():
-            base_url = f"https://finance.yahoo.co.jp/quote/{ticker}/history"
+        t = ticker.strip()
+
+        if t.endswith(".T"):
+            # Already has .T suffix - use as-is
+            base_url = f"https://finance.yahoo.co.jp/quote/{t}/history"
+        elif t.isdigit() and len(t) == 4:
+            # 4-digit number = Japanese stock/ETF - append .T
+            base_url = f"https://finance.yahoo.co.jp/quote/{t}.T/history"
+        elif len(t) == 8:
+            # 8-character code = Japanese mutual fund - NO .T
+            base_url = f"https://finance.yahoo.co.jp/quote/{t}/history"
         else:
-            base_url = f"https://finance.yahoo.com/quote/{ticker}/history"
+            # Letters only or other format = US stock - use yahoo.com
+            base_url = f"https://finance.yahoo.com/quote/{t}/history"
         
         # Add frequency parameter for Yahoo Finance Japan
         if "yahoo.co.jp" in base_url and frequency == "weekly":
@@ -93,6 +97,40 @@ class YahooScraperFetcher:
             base_url += "?frequency=w"
         
         return base_url
+
+    def _try_download_api(self, ticker: str, start_date: date, end_date: date) -> Optional[pd.DataFrame]:
+        """
+        Try Yahoo Finance CSV download API before heavy scraping.
+        Only used for tickers where this endpoint is known to work (e.g., stocks/ETFs).
+        """
+        try:
+            period1 = int(datetime.combine(start_date, datetime.min.time()).timestamp())
+            period2 = int(datetime.combine(end_date + timedelta(days=1), datetime.min.time()).timestamp())
+            url = (
+                f"https://query1.finance.yahoo.com/v7/finance/download/{ticker}"
+                f"?period1={period1}&period2={period2}&interval=1d&events=history&includeAdjustedClose=true"
+            )
+            self._log(f"Trying download API: {url}")
+            import requests
+
+            resp = requests.get(url, timeout=10)
+            if resp.status_code != 200 or "Date,Open,High,Low,Close" not in resp.text:
+                self._log(f"Download API failed with status {resp.status_code}")
+                return None
+
+            df = pd.read_csv(io.StringIO(resp.text))
+            if df.empty or "Date" not in df.columns or "Close" not in df.columns:
+                return None
+
+            df = df[["Date", "Close"]].rename(columns={"Close": "price"})
+            df["date"] = pd.to_datetime(df["Date"])
+            df.set_index("date", inplace=True)
+            df = df[["price"]]
+            self._log(f"Download API succeeded: {len(df)} rows")
+            return df
+        except Exception as e:
+            self._log(f"Download API error: {e}")
+            return None
     
     def _log(self, message: str):
         """Print debug message if debug mode is enabled"""
@@ -919,6 +957,11 @@ class YahooScraperFetcher:
         
         records: List[dict] = []
 
+        # Try lightweight CSV download endpoint first for stocks/ETFs
+        download_df = self._try_download_api(ticker, start_date, end_date)
+        if download_df is not None:
+            return download_df
+
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=self.headless)
             page = browser.new_page()
@@ -937,6 +980,20 @@ class YahooScraperFetcher:
                 # Debug snapshot after initial load
                 self._debug_snapshot(page, "initial_load", ticker)
                 self._debug_element_info(page, "After initial load")
+
+                # Detect page type by checking table structure
+                try:
+                    first_row = page.locator("table tr").nth(1)  # Skip header
+                    if first_row.count() > 0:
+                        cell_count = first_row.locator("td").count()
+                        if cell_count == 6:
+                            self._log(f"Detected STOCK/ETF page (6 <td> cells)")
+                        elif cell_count == 3:
+                            self._log(f"Detected MUTUAL FUND page (3 <td> cells)")
+                        else:
+                            self._log(f"Unknown page type ({cell_count} <td> cells)")
+                except Exception as e:
+                    self._log(f"Could not detect page type: {e}")
 
                 # DISABLED: Setting custom date range triggers Yahoo anti-bot protection
                 # Yahoo Finance Japan provides ~1 year of data by default
@@ -1053,11 +1110,19 @@ class YahooScraperFetcher:
                         if cell_count < 2:
                             continue
 
-                        # Parse date
-                        date_text = cells.nth(0).inner_text().strip()
-                        if not any(char.isdigit() for char in date_text):
+                        # Parse date - try <th> first (stocks), then first <td> (funds)
+                        date_text = None
+                        date_th = tr.locator("th")
+                        if date_th.count() > 0:
+                            # Stock page: date is in <th>
+                            date_text = date_th.first.inner_text().strip()
+                        else:
+                            # Fund page: date is in first <td>
+                            date_text = cells.nth(0).inner_text().strip()
+
+                        if not date_text or not any(char.isdigit() for char in date_text):
                             continue
-                        
+
                         parsed_date = _normalize_jp_date(date_text)
                         if not parsed_date:
                             for fmt in ["%m/%d/%Y", "%Y/%m/%d", "%d/%m/%Y", "%Y-%m-%d"]:
@@ -1066,7 +1131,7 @@ class YahooScraperFetcher:
                                     break
                                 except Exception:
                                     continue
-                        
+
                         if not parsed_date:
                             continue
 
@@ -1074,15 +1139,33 @@ class YahooScraperFetcher:
                         if parsed_date < start_date or parsed_date > end_date:
                             continue
 
-                        # Parse NAV (基準価額) - typically in column 1
+                        # Parse price based on page type
+                        # Stock/ETF pages have 6 <td> cells: [始値, 高値, 安値, 終値, 出来高, 調整後終値]
+                        #   (Date is in <th>, not counted in cell_count)
+                        # Fund pages have 3 <td> cells: [基準価額, 前日比, 純資産]
+                        #   (Date is in <th>, not counted in cell_count)
+
                         nav = None
-                        if cell_count >= 2:
+
+                        if cell_count == 6:
+                            # Stock/ETF page - use 調整後終値 (Adjusted Close) from index 5
+                            nav_text = cells.nth(5).inner_text().strip()
+                            nav = _parse_number(nav_text)
+
+                            # Fallback to 終値 (Close) from index 3 if adjusted close is missing
+                            if nav is None or nav <= 0:
+                                nav_text = cells.nth(3).inner_text().strip()
+                                nav = _parse_number(nav_text)
+
+                        elif cell_count >= 2:
+                            # Mutual fund page - use 基準価額 (NAV) from column 1
                             nav_text = cells.nth(1).inner_text().strip()
                             nav = _parse_number(nav_text)
-                        
-                        if nav is None and cell_count > 2:
-                            nav_text = cells.nth(cell_count - 1).inner_text().strip()
-                            nav = _parse_number(nav_text)
+
+                            # Fallback to last column if column 1 fails
+                            if nav is None and cell_count > 2:
+                                nav_text = cells.nth(cell_count - 1).inner_text().strip()
+                                nav = _parse_number(nav_text)
                         
                         if nav is None or nav <= 0:
                             continue

@@ -318,7 +318,15 @@ class HistoricalPriceService:
             return count >= 3 and (time.time() - last_ts) < cooldown
 
         # NEW: Check database cache first (try all data sources in priority order)
-        yahoo_ticker = get_yahoo_ticker(fetch_symbol) or fetch_symbol
+        # If no mapping found and symbol looks JP numeric, default to .T
+        yahoo_ticker = get_yahoo_ticker(fetch_symbol)
+        if not yahoo_ticker:
+            if fetch_symbol.endswith(".T"):
+                yahoo_ticker = fetch_symbol
+            elif fetch_symbol.isdigit():
+                yahoo_ticker = f"{fetch_symbol}.T"
+            else:
+                yahoo_ticker = fetch_symbol
 
         # Try data sources in order of preference: scraped > nav > yahoo > alt > interpolated
         for source_type in ['scraped', 'nav', 'yahoo', 'alt', 'interpolated']:
@@ -361,7 +369,10 @@ class HistoricalPriceService:
                 scraped = self._with_retry(
                     lambda: self.scraper.fetch(yahoo_ticker, effective_start, effective_end)
                 )
-            except Exception:
+                if scraped is None:
+                    print(f"⚠️  Scraper returned None for {yahoo_ticker}")
+            except Exception as e:
+                print(f"❌ Scraper error for {yahoo_ticker}: {e}")
                 self._failures[(fetch_symbol, 'scraped')] = (self._failures.get((fetch_symbol, 'scraped'), (0, 0.0))[0] + 1, time.time())
         if scraped is not None:
             self._cache[cache_key] = (scraped, 'scraped')
@@ -373,8 +384,12 @@ class HistoricalPriceService:
             return scraped, 'scraped'
 
         # Tier 2: Yahoo Finance API (yfinance)
+        # Skip yfinance for Japanese stocks (doesn't support .T suffix well)
         yf_ticker = get_yahoo_ticker(fetch_symbol)
-        if yf_ticker and not _is_open('yahoo'):
+        yf_ticker = yahoo_ticker
+        if yf_ticker and yf_ticker.endswith('.T'):
+            print(f"⏭️  Skipping yfinance for Japanese ticker {yf_ticker} (not supported)")
+        elif yf_ticker and not _is_open('yahoo'):
             print(f"🔍 Tier 2: Yahoo Finance API for {fetch_symbol}")
             try:
                 prices = self._with_retry(
@@ -393,7 +408,10 @@ class HistoricalPriceService:
                 return prices, 'yahoo'
 
         # Tier 3: Alternative provider (Twelve Data / Alpha Vantage)
-        if yf_ticker and not _is_open('alt'):
+        # Skip alt providers for Japanese stocks (don't support .T suffix)
+        if yf_ticker and yf_ticker.endswith('.T'):
+            print(f"⏭️  Skipping alt provider for Japanese ticker {yf_ticker} (not supported)")
+        elif yf_ticker and not _is_open('alt'):
             print(f"🔍 Tier 3: Alternative provider for {fetch_symbol}")
             try:
                 alt_prices = self._with_retry(

@@ -29,8 +29,10 @@ ALIAS_MAP = {
     "1542": "1542",  # 純銀上場信託
     "1674": "1674",  # WT白金上場投信
     "1693": "1693",  # WT銅上場投信
+    "1693.T": "1693",
     "2516": "2516",  # 東証グロース250ETF
     "4755": "4755",  # 楽天グループ
+    "4755.T": "4755",
 }
 
 NAME_ALIASES = {
@@ -88,9 +90,13 @@ NAME_ALIASES = {
     "ＷＴ銅上場投信（WisdomTree 銅）": "1693",
     "ＷＴ銅上場投信": "1693",
     "WisdomTree 銅": "1693",
+    "ＷＴ銅上場投信 ETF": "1693",
+    "WT銅上場投信": "1693",
+    "ＷＴ 銅 上場投信": "1693",
     "東証グロース２５０ＥＴＦ": "2516",
     "東証グロース250ETF": "2516",
     "楽天グループ": "4755",
+    "楽天 グループ": "4755",
 }
 
 
@@ -101,11 +107,19 @@ def resolve_alias(symbol: str, name: str) -> Tuple[str, str]:
     Returns:
         (fetch_symbol, fetch_name)
     """
-    if symbol in ALIAS_MAP:
-        return ALIAS_MAP[symbol], name
+    symbol_normalized = symbol.replace(" ", "").replace("　", "") if symbol else symbol
+
+    if symbol_normalized in ALIAS_MAP:
+        return ALIAS_MAP[symbol_normalized], name
+
+    # Fallback: if original symbol had .T and stripped is in ALIAS_MAP
+    if symbol_normalized and symbol_normalized.endswith(".T"):
+        stripped = symbol_normalized.replace(".T", "")
+        if stripped in ALIAS_MAP:
+            return ALIAS_MAP[stripped], name
 
     for key, target in NAME_ALIASES.items():
-        if key in name:
+        if key in name.replace("　", "").replace(" ", ""):
             return target, name
 
     return symbol, name

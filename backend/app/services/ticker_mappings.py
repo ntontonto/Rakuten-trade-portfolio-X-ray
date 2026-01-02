@@ -55,7 +55,31 @@ def get_yahoo_ticker(symbol: str) -> str:
     Returns:
         Yahoo Finance ticker or None
     """
-    return TICKER_TO_YAHOO.get(symbol)
+    if not symbol:
+        return None
+
+    # Pass through if already a Yahoo-style JP ticker
+    if symbol.endswith(".T"):
+        return symbol
+
+    # Direct map hit
+    mapped = TICKER_TO_YAHOO.get(symbol)
+    if mapped:
+        return mapped
+
+    # Numeric JP tickers - distinguish stocks (4 digits) from funds (8 digits)
+    if symbol.isdigit():
+        if len(symbol) == 4:
+            # 4-digit stock/ETF codes get .T suffix
+            return f"{symbol}.T"
+        elif len(symbol) == 8:
+            # 8-digit mutual fund codes - no .T suffix
+            return symbol
+        else:
+            # Unknown pattern - add .T as fallback
+            return f"{symbol}.T"
+
+    return None
 
 
 def is_us_security(symbol: str) -> bool:
