@@ -328,6 +328,47 @@ class HistoricalPriceService:
             else:
                 yahoo_ticker = fetch_symbol
 
+        def _merge_with_interpolation(base_df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
+            """
+            Merge external data with transaction-based interpolation for missing dates.
+
+            - 取得期間内の欠損: 直前の外部価格で forward-fill
+            - 取得期間外の欠損: 取引ベースの補完で埋める
+            """
+            if base_df is None or base_df.empty:
+                return base_df
+
+            # 外部データの期間を特定
+            external_start = base_df.index.min().date() if hasattr(base_df.index.min(), "date") else base_df.index.min()
+            external_end = base_df.index.max().date() if hasattr(base_df.index.max(), "date") else base_df.index.max()
+
+            full_range = pd.date_range(effective_start, effective_end, freq="D")
+
+            # 取得期間内のギャップは前日外部価格で埋める
+            external_only = base_df.reindex(full_range).ffill()
+
+            # 取得期間外は取引補完に頼る
+            txs = (
+                self.db.query(Transaction)
+                .filter(
+                    Transaction.portfolio_id == portfolio_id,
+                    Transaction.symbol == symbol
+                )
+                .order_by(Transaction.transaction_date)
+                .all()
+            )
+            interp_df = self.interpolator.interpolate(txs, effective_start, effective_end)
+            if interp_df is not None and not interp_df.empty:
+                interp_df = interp_df.reindex(full_range)
+            # combine: 外部期間内は external_only、それ以外は interp
+            filled = external_only.copy()
+            if interp_df is not None and not interp_df.empty:
+                filled["price"] = filled["price"].fillna(interp_df["price"])
+
+            # 明示的に並び替え
+            filled.sort_index(inplace=True)
+            return filled
+
         # Try cache in order of preference: yahoo/alt caches are cheap and avoid scraping first
         for source_type in ['yahoo', 'alt', 'scraped', 'nav', 'interpolated']:
             cached_data, cache_source = self.cache_service.get_price_history(
@@ -338,12 +379,15 @@ class HistoricalPriceService:
                 source=source_type
             )
             if cached_data is not None and cache_source == 'cache':
-                print(f"✅ Cache hit: {len(cached_data)} rows from '{source_type}' source")
-                self._cache[cache_key] = (cached_data, source_type)
+                merged_cached = _merge_with_interpolation(cached_data)
+                if merged_cached is None:
+                    merged_cached = cached_data
+                print(f"✅ Cache hit: {len(merged_cached)} rows from '{source_type}' source")
+                self._cache[cache_key] = (merged_cached, source_type)
                 evt.set()
                 with self._inflight_lock:
                     self._inflight.pop(cache_key, None)
-                return cached_data, source_type
+                return merged_cached, source_type
 
         # Tier 0: Official NAV cache
         nav_prices = None
@@ -355,11 +399,17 @@ class HistoricalPriceService:
             except Exception:
                 self._failures[(fetch_symbol, 'nav')] = (self._failures.get((fetch_symbol, 'nav'), (0, 0.0))[0] + 1, time.time())
         if nav_prices is not None:
+            merged_nav = _merge_with_interpolation(nav_prices)
+            if merged_nav is None:
+                merged_nav = nav_prices
             print(f"📊 Using official NAV for {fetch_name[:30]}...")
-            self._cache[cache_key] = (nav_prices, 'nav')
+            self._cache[cache_key] = (merged_nav, 'nav')
             # Store NAV data in cache
             self.cache_service._store_price_data(fetch_symbol, yahoo_ticker, nav_prices, 'nav')
-            return nav_prices, 'nav'
+            evt.set()
+            with self._inflight_lock:
+                self._inflight.pop(cache_key, None)
+            return merged_nav, 'nav'
 
         # Tier 1: Yahoo Finance API (yfinance)
         yf_ticker = yahoo_ticker
@@ -373,13 +423,16 @@ class HistoricalPriceService:
                 prices = None
                 self._failures[(fetch_symbol, 'yahoo')] = (self._failures.get((fetch_symbol, 'yahoo'), (0, 0.0))[0] + 1, time.time())
             if prices is not None:
-                self._cache[cache_key] = (prices, 'yahoo')
+                merged_prices = _merge_with_interpolation(prices)
+                if merged_prices is None:
+                    merged_prices = prices
+                self._cache[cache_key] = (merged_prices, 'yahoo')
                 # Store yfinance data in cache
                 self.cache_service._store_price_data(fetch_symbol, yf_ticker, prices, 'yahoo')
                 evt.set()
                 with self._inflight_lock:
                     self._inflight.pop(cache_key, None)
-                return prices, 'yahoo'
+                return merged_prices, 'yahoo'
 
         # Tier 2: Alternative provider (Twelve Data / Alpha Vantage)
         if yf_ticker and not _is_open('alt'):
@@ -392,13 +445,16 @@ class HistoricalPriceService:
                 alt_prices = None
                 self._failures[(fetch_symbol, 'alt')] = (self._failures.get((fetch_symbol, 'alt'), (0, 0.0))[0] + 1, time.time())
             if alt_prices is not None:
-                self._cache[cache_key] = (alt_prices, 'alt')
+                merged_alt = _merge_with_interpolation(alt_prices)
+                if merged_alt is None:
+                    merged_alt = alt_prices
+                self._cache[cache_key] = (merged_alt, 'alt')
                 # Store alternative provider data in cache
                 self.cache_service._store_price_data(fetch_symbol, yf_ticker, alt_prices, 'alt')
                 evt.set()
                 with self._inflight_lock:
                     self._inflight.pop(cache_key, None)
-                return alt_prices, 'alt'
+                return merged_alt, 'alt'
 
         # Tier 3: Scrape Yahoo Finance (JP/Global)
         scraped = None
@@ -414,13 +470,16 @@ class HistoricalPriceService:
                 print(f"❌ Scraper error for {yahoo_ticker}: {e}")
                 self._failures[(fetch_symbol, 'scraped')] = (self._failures.get((fetch_symbol, 'scraped'), (0, 0.0))[0] + 1, time.time())
         if scraped is not None:
-            self._cache[cache_key] = (scraped, 'scraped')
+            merged_scraped = _merge_with_interpolation(scraped)
+            if merged_scraped is None:
+                merged_scraped = scraped
+            self._cache[cache_key] = (merged_scraped, 'scraped')
             # Store scraped data in cache
             self.cache_service._store_price_data(fetch_symbol, yahoo_ticker, scraped, 'scraped')
             evt.set()
             with self._inflight_lock:
                 self._inflight.pop(cache_key, None)
-            return scraped, 'scraped'
+            return merged_scraped, 'scraped'
 
         # Tier 4: Fallback to Linear Interpolation
         print(f"🔍 Tier 4: Interpolation for {symbol}")
@@ -435,12 +494,25 @@ class HistoricalPriceService:
             .all()
         )
 
+        # If we had partial external data, merge gaps with interpolation
+        if cache_key in self._cache:
+            base_df, base_source = self._cache[cache_key]
+            interp_df = self.interpolator.interpolate(transactions, effective_start, effective_end)
+            if interp_df is not None and base_df is not None:
+                merged = base_df.copy()
+                merged = merged.reindex(interp_df.index)
+                merged["price"] = merged["price"].combine_first(interp_df["price"])
+                self._cache[cache_key] = (merged, base_source)
+                evt.set()
+                with self._inflight_lock:
+                    self._inflight.pop(cache_key, None)
+                return merged, base_source
+
         prices = self.interpolator.interpolate(transactions, effective_start, effective_end)
 
         if prices is not None:
             self._cache[cache_key] = (prices, 'interpolated')
-            # Store interpolated data in cache for future use
-            self.cache_service._store_price_data(fetch_symbol, yahoo_ticker, prices, 'interpolated')
+            # Do NOT store interpolated data in DB cache; keep it in-process only
             evt.set()
             with self._inflight_lock:
                 self._inflight.pop(cache_key, None)
