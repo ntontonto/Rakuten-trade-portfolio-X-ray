@@ -26,12 +26,13 @@ class PortfolioAggregator:
         """Accept UUID or string and return UUID instance for queries."""
         return portfolio_id if isinstance(portfolio_id, UUID) else UUID(str(portfolio_id))
 
-    def process_portfolio(self, portfolio_id: str) -> List[Holding]:
+    def process_portfolio(self, portfolio_id: str, allowed_assets=None) -> List[Holding]:
         """
         Process all transactions for a portfolio and create/update holdings
 
         Args:
             portfolio_id: Portfolio UUID
+            allowed_assets: Optional set of normalized symbols/names that are permitted. If None, no filtering.
 
         Returns:
             List of updated Holding objects
@@ -104,6 +105,16 @@ class PortfolioAggregator:
             # Only create holdings for positions with qty > 0.0001
             if data['qty'] <= Decimal('0.0001'):
                 continue
+
+            # Filter by allowed assets if provided
+            if allowed_assets is not None:
+                from app.utils.currency import normalize_japanese_text
+
+                key_symbol = normalize_japanese_text(symbol)
+                key_name = normalize_japanese_text(data.get('name'))
+                if key_symbol not in allowed_assets and key_name not in allowed_assets:
+                    # Skip creation/update if asset is not permitted by balance CSV
+                    continue
 
             holding_days = (today - data['first_date']).days
 

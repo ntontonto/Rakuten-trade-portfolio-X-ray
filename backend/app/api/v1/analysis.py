@@ -404,7 +404,7 @@ def _build_price_map(
     fx_map: Dict[date, float],
     transactions: List[Transaction]
 ):
-    """Fetch price history once and convert to JPY map."""
+    """Fetch price history once and convert to JPY map. Forward-fill to avoid gaps. If no external data, interpolate from transactions."""
     prices, source = price_service.get_price_history(
         symbol=holding.symbol,
         name=holding.name,
@@ -443,6 +443,19 @@ def _build_price_map(
                 price_map[d] = raw * fx
         else:
             price_map[d] = raw
+
+    # Forward-fill missing days to avoid 0 drops on non-trading days
+    filled_map: Dict[date, float] = {}
+    last_price = None
+    current_date = start_date
+    while current_date <= end_date:
+        if current_date in price_map:
+            last_price = price_map[current_date]
+        if last_price is not None:
+            filled_map[current_date] = last_price
+        current_date += timedelta(days=1)
+
+    price_map = filled_map
     return price_map, source
 
 

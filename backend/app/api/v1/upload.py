@@ -186,7 +186,21 @@ async def upload_csv_files(
     db.commit()
 
     # Aggregate transactions into holdings
-    holdings = aggregator.process_portfolio(portfolio_id)
+    # Build allowed asset set from balance CSV (if provided)
+    allowed_assets = None
+    if balance_data:
+        from app.utils.currency import normalize_japanese_text
+
+        allowed_assets = set()
+        for item in balance_data:
+            code = normalize_japanese_text(item.get('code')) if item.get('code') else None
+            name = normalize_japanese_text(item.get('name')) if item.get('name') else None
+            if code:
+                allowed_assets.add(code)
+            if name:
+                allowed_assets.add(name)
+
+    holdings = aggregator.process_portfolio(portfolio_id, allowed_assets=allowed_assets)
 
     # Merge balance data if available
     merge_stats = None
